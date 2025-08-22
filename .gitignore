@@ -1,0 +1,38 @@
+# Logs
+logs/
+*.log
+
+# Build results
+bin/
+obj/
+out/
+
+# User secrets
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# .NET Core
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Rider IDE
+.idea/
+
+# Visual Studio Code
+.vscode/
+
+# JetBrains
+*.DotSettings.user
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

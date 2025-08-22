@@ -1,0 +1,44 @@
+{
+  "exchanges": [
+    {
+      "name": "klim.change.events",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {
+      }
+    }
+  ],
+  "queues": [
+    {
+      "name": "klim.events.datachanged.v1",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "klim.events.datachanged.v1.dlq"
+      }
+    },
+    {
+      "name": "klim.events.datachanged.v1.dlq",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+      }
+    }
+  ],
+  "bindings": [
+    {
+      "source": "klim.change.events",
+      "vhost": "/",
+      "destination": "klim.events.datachanged.v1",
+      "destination_type": "queue",
+      "routing_key": "data.changed.v1",
+      "arguments": {
+      }
+    }
+  ]
+}

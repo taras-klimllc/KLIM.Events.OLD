@@ -1,0 +1,15 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4.0-management
+    ports: ["5672:5672", "15672:15672"]
+    volumes:
+      - ./ops/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json
+    environment:
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: -rabbitmq_management load_definitions "/etc/rabbitmq/definitions.json"
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Your_strong_password123"
+    ports: ["1433:1433"]
