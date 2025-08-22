@@ -1,0 +1,40 @@
+flowchart LR
+    subgraph "Data Sources"
+        A[dbo.Issuers]
+        B[dbo.Deals]
+        C[dbo.InstrumentMaster]
+    end
+    
+    subgraph "Change Detection"
+        D[SQL Change<br/>Tracking]
+    end
+    
+    subgraph "Processing"
+        E[Entity-Specific<br/>Projectors]
+        F[Outbox Pattern<br/>Implementation]
+    end
+    
+    subgraph "Message Bus"
+        G[RabbitMQ<br/>Topic Exchange]
+    end
+    
+    subgraph "Consumers"
+        H[Downstream<br/>Applications]
+    end
+    
+    A --> D
+    B --> D
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    
+    style A fill:#e1f5fe
+    style B fill:#e1f5fe
+    style C fill:#e1f5fe
+    style D fill:#fff3e0
+    style E fill:#fce4ec
+    style F fill:#f3e5f5
+    style G fill:#e8f5e8
+    style H fill:#e8f5e8

@@ -1,0 +1,86 @@
+graph TB
+    subgraph "SQL Server Database"
+        DB[(SQL Server<br/>KLIM_IM_TK)]
+        ISSUERS[("dbo.Issuers<br/>(Change Tracking)")]
+        DEALS[("dbo.Deals<br/>(Change Tracking)")]
+        INSTRUMENTS[("dbo.InstrumentMaster<br/>(Change Tracking)")]
+        OUTBOX[("dbo.OutboxMessages<br/>(Transactional Store)")]
+        CURSOR[("dbo.ChangeTrackingCursor<br/>(Watermarks)")]
+    end
+    
+    subgraph "KLIM.Events Service"
+        subgraph "Change Tracking Layer"
+            POLLING["ChangeTrackingPollingService<br/>(BackgroundService)"]
+            
+            subgraph "Entity Projectors"
+                ISSUER_PROJ["IssuerProjector<br/>EntityType: Issuer"]
+                DEAL_PROJ["DealProjector<br/>EntityType: Deal"]  
+                INSTRUMENT_PROJ["InstrumentProjector<br/>EntityType: Instrument"]
+                GENERIC_PROJ["GenericProjector<br/>(Fallback)"]
+            end
+        end
+        
+        subgraph "Outbox Pattern"
+            OUTBOX_REPO["OutboxRepository"]
+            OUTBOX_DISPATCHER["OutboxDispatcherService"]
+            MESSAGE_PUB["MessagePublisher"]
+        end
+        
+        subgraph "Observability"
+            DIAGNOSTICS["OutboxDiagnosticService"]
+            LOGGER["Logging Extensions"]
+            CORRELATION["CorrelationFilter"]
+        end
+        
+        subgraph "Infrastructure"
+            AUTH["SqlAuthenticationService"]
+            HEALTH_HOST["HealthEndpointHostService"]
+        end
+    end
+    
+    subgraph "RabbitMQ Message Bus"
+        EXCHANGE["klim.change.events<br/>(Topic Exchange)"]
+        QUEUE["klim.events.datachanged.v1<br/>(Main Queue)"]
+        DLQ["Dead Letter Queue"]
+    end
+    
+    subgraph "Downstream"
+        CONSUMER["DataChangedConsumer"]
+        APPS["Applications<br/>Analytics<br/>Notifications"]
+    end
+    
+    %% Data Flow
+    DB --> ISSUERS
+    DB --> DEALS  
+    DB --> INSTRUMENTS
+    DB --> OUTBOX
+    DB --> CURSOR
+    
+    ISSUERS --> POLLING
+    DEALS --> POLLING
+    INSTRUMENTS --> POLLING
+    
+    POLLING --> ISSUER_PROJ
+    POLLING --> DEAL_PROJ
+    POLLING --> INSTRUMENT_PROJ
+    POLLING --> GENERIC_PROJ
+    
+    ISSUER_PROJ --> OUTBOX_REPO
+    DEAL_PROJ --> OUTBOX_REPO
+    INSTRUMENT_PROJ --> OUTBOX_REPO
+    GENERIC_PROJ --> OUTBOX_REPO
+    
+    OUTBOX_REPO --> OUTBOX
+    OUTBOX --> OUTBOX_DISPATCHER
+    OUTBOX_DISPATCHER --> MESSAGE_PUB
+    MESSAGE_PUB --> EXCHANGE
+    
+    EXCHANGE --> QUEUE
+    QUEUE --> DLQ
+    QUEUE --> CONSUMER
+    CONSUMER --> APPS
+    
+    %% Monitoring
+    OUTBOX_DISPATCHER -.-> DIAGNOSTICS
+    MESSAGE_PUB -.-> LOGGER
+    AUTH -.-> OUTBOX_REPO

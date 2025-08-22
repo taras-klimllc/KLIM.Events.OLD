@@ -1,0 +1,46 @@
+sequenceDiagram
+    participant SQL as SQL Server
+    participant Polling as ChangeTrackingPollingService
+    participant Projector as Entity Projector
+    participant Outbox as OutboxRepository
+    participant Dispatcher as OutboxDispatcherService
+    participant RMQ as RabbitMQ Exchange
+    participant Consumer as DataChangedConsumer
+
+    Note over SQL: Data change occurs in dbo.Issuers
+    SQL->>+Polling: Poll for changes (every 5s)
+    Polling->>SQL: CHANGETABLE query with cursor
+    SQL-->>Polling: Return change batch
+    
+    Polling->>+Projector: ProjectAsync(TableChangeBatch)
+    Projector->>SQL: Load current/historical data
+    SQL-->>Projector: Entity details for DisplayName
+    Projector->>Projector: Create DataChangedV1 event
+    Projector-->>-Polling: Return OutboxInsert[]
+    
+    Polling->>+Outbox: WriteMessagesAsync(inserts)
+    Outbox->>SQL: BEGIN TRANSACTION
+    Outbox->>SQL: INSERT INTO OutboxMessages
+    Outbox->>SQL: UPDATE ChangeTrackingCursor
+    Outbox->>SQL: COMMIT TRANSACTION
+    Outbox-->>-Polling: Transaction complete
+    
+    Note over Dispatcher: Background service runs every 2s
+    Dispatcher->>+Outbox: GetPendingMessagesAsync(batchSize: 100)
+    Outbox->>SQL: SELECT pending messages
+    SQL-->>Outbox: Batch of pending messages
+    Outbox-->>-Dispatcher: Return message batch
+    
+    loop For each message in batch
+        Dispatcher->>+RMQ: Publish DataChangedV1
+        RMQ-->>-Dispatcher: Confirm published
+        Dispatcher->>Outbox: Mark as dispatched
+    end
+    
+    RMQ->>+Consumer: Route to queue
+    Consumer->>Consumer: Process change event
+    Consumer->>Consumer: Emit DataChangeProcessed
+    Consumer-->>-RMQ: Acknowledge message
+    
+    Note over Dispatcher: Every 5 minutes
+    Dispatcher->>Dispatcher: Log diagnostics status
