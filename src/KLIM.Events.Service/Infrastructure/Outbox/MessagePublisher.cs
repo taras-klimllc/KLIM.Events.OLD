@@ -43,6 +43,10 @@ public sealed class MessagePublisher
         var exchange = GetExchange(messageType);
         var routingKey = GetRoutingKey(messageType);
 
+        _logger.LogDebug("Publishing message {Id} to exchange {Exchange} with routing key {RoutingKey}", 
+            message.Id, exchange, routingKey);
+
+        // Use the correct routing - publish to the topic exchange with routing key
         await _bus.Publish(messageObj, ctx =>
         {
             if (headers != null)
@@ -52,7 +56,14 @@ public sealed class MessagePublisher
             }
             ctx.MessageId = message.Id;
             ctx.Headers.Set("OccurredAt", message.OccurredAt.ToString("O"));
+            
+            // Ensure we're publishing to the correct exchange with the routing key
+            // ctx.Headers.Set("Exchange", exchange);
+            // ctx.Headers.Set("RoutingKey", routingKey);
         }, cancellationToken);
+
+        _logger.LogInformation("Successfully published message {Id} to {Exchange}/{RoutingKey}", 
+            message.Id, exchange, routingKey);
 
         var changeDetails = ExtractChangeDetails(messageObj);
         return PublishResult.Success(exchange, routingKey, changeDetails);
@@ -74,12 +85,11 @@ public sealed class MessagePublisher
         }
     }
 
-    private static string GetExchange(Type messageType) => messageType == typeof(DataChangedV1) 
-        ? "klim.change.events" 
-        : "klim.change.events";
+    private static string GetExchange(Type messageType) =>
+        messageType == typeof(DataChangedV1) ? "klim.change.events" : "klim.change.events";
 
     private static string GetRoutingKey(Type messageType) => messageType == typeof(DataChangedV1)
-        ? "data.changed.v1"
+        ? "data.changed.v1"  // Keep the original routing key with dot
         : messageType.Name.ToLowerInvariant();
 
     private static ChangeDetails ExtractChangeDetails(object messageObj)

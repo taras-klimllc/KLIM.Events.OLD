@@ -9,10 +9,11 @@ using Serilog;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+// Configure Serilog once, rely solely on configuration (avoids duplicate console logs)
 Log.Logger = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
-    .WriteTo.Console()
+    // Removed explicit .WriteTo.Console() to prevent duplicate console entries (console sink already in appsettings.json)
     .CreateLogger();
 
 builder.Logging.ClearProviders();
@@ -37,7 +38,7 @@ builder.Services.AddSingleton<IChangeEventProjector, GenericDomainChangeProjecto
 builder.Services.AddMassTransit(x =>
 {
     x.SetKebabCaseEndpointNameFormatter();
-    x.AddConsumer<DataChangedConsumer>();
+    // Publishing only (no consumer endpoint registered here)
 
     x.UsingRabbitMq((context, cfg) =>
     {
@@ -60,11 +61,8 @@ builder.Services.AddMassTransit(x =>
         cfg.Message<DataChangedV1>(m => m.SetEntityName("klim.change.events"));
         cfg.Publish<DataChangedV1>(p => { p.ExchangeType = "topic"; });
 
-        cfg.ReceiveEndpoint("klim.events.datachanged.v1", ep =>
-        {
-            ep.ConfigureConsumer<DataChangedConsumer>(context);
-            ep.Bind<DataChangedV1>(b => { b.RoutingKey = "data.changed.v1"; });
-        });
+        // Versioned routing key
+        cfg.Send<DataChangedV1>(s => s.UseRoutingKeyFormatter(_ => "data.changed.v1"));
     });
 });
 
