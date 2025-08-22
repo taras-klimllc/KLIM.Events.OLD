@@ -46,7 +46,7 @@ public sealed class IssuerProjector : IChangeEventProjector
             FigiID, BBGID, IssuerReportingName, BorrowerName, CountryId, 
             VerticalID, MoodysIndustryId, IssuerESGCode, Performing, PublicIssuer, 
             DealLeadID, ParentIssuerID, HSIssuerID, VPMIssuerID, SSIssuerID, 
-            WSOIssuerID, PBIIIssuerID, ReorgIssuerID, IsBDC, StatusCode, 
+            WSOIssuerID, PBIIssuerID, ReorgIssuerID, IsBDC, StatusCode, 
             CreatedBy, Created, LastUpdatedBy, LastUpdated, 
             FinalReview, YodaIssuerID, FindoxIssuerID, Restricted, 
             RestrictionStartDate, RestrictionEndDate, LastRestricted, RestrictedBy, 
