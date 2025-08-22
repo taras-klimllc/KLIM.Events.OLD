@@ -255,6 +255,18 @@ grep "EntityType.*YourEntityType" logs/outbox-*.log
 grep "No projector output" logs/outbox-*.log
 ```
 
+#### **PowerShell Equivalents**
+```powershell
+# Check if table appears in startup logs
+Select-String -Path "logs\outbox-*.log" -Pattern "Tables="
+
+# Monitor events for your entity type
+Select-String -Path "logs\outbox-*.log" -Pattern "EntityType.*YourEntityType"
+
+# Check for projector warnings
+Select-String -Path "logs\outbox-*.log" -Pattern "No projector output"
+```
+
 #### **Health Monitoring**
 The service automatically monitors your new table:
 - ✅ Cursor management in `dbo.ChangeTrackingCursor`

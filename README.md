@@ -655,8 +655,13 @@ dotnet build
 # Run locally to test
 dotnet run --project src/KLIM.Events.Service/KLIM.Events.Service.csproj
 
-# Check logs for your entity type
+# Check logs for your entity type (Linux/macOS)
 grep "EntityType.*Instrument" logs/outbox-*.log
+```
+
+```powershell
+# Check logs for your entity type (Windows)
+Select-String -Path "logs\outbox-*.log" -Pattern "EntityType.*Instrument"
 ```
 
 ---
@@ -723,6 +728,23 @@ grep "BATCH PROCESSED" logs/outbox-*.log
 
 # Track errors
 grep "ERROR" logs/outbox-*.log
+```
+
+#### PowerShell Equivalents
+```powershell
+# View all outbox activity
+Select-String -Path "logs\outbox-*.log" -Pattern "OUTBOX"
+
+# Check for specific entity changes
+Select-String -Path "logs\outbox-*.log" -Pattern "EntityType.*Issuer"
+Select-String -Path "logs\outbox-*.log" -Pattern "EntityType.*Deal"  
+Select-String -Path "logs\outbox-*.log" -Pattern "EntityType.*Instrument"
+
+# Monitor batch processing
+Select-String -Path "logs\outbox-*.log" -Pattern "BATCH PROCESSED"
+
+# Track errors
+Select-String -Path "logs\outbox-*.log" -Pattern "ERROR"
 ```
 
 #### Structured Property Searches
