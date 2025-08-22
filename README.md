@@ -400,8 +400,7 @@ Add the new table to your `appsettings.json` or configuration source:
     "Tables": [
       { "Schema": "dbo", "Name": "Issuers", "Pk": "IssuerID" },
       { "Schema": "dbo", "Name": "Deals", "Pk": "DealID" },
-      { "Schema": "dbo", "Name": "InstrumentMaster", "Pk": "InstrumentID" },
-      { "Schema": "dbo", "Name": "Users", "Pk": "UserID" }
+      { "Schema": "dbo", "Name": "InstrumentMaster", "Pk": "InstrumentID" }
     ]
   }
 }
@@ -411,9 +410,6 @@ Add the new table to your `appsettings.json` or configuration source:
 ```sql
 -- Enable change tracking for the new table
 ALTER TABLE dbo.InstrumentMaster ENABLE CHANGE_TRACKING 
-WITH (TRACK_COLUMNS_UPDATED = ON);
-
-ALTER TABLE dbo.Users ENABLE CHANGE_TRACKING 
 WITH (TRACK_COLUMNS_UPDATED = ON);
 ```
 

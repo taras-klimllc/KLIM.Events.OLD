@@ -30,7 +30,7 @@ The KLIM.Events service has evolved into a robust, generic data change tracking 
 
 ### ✅ **Completed Excellence**
 - **Clean Generic Architecture** — Entity-agnostic design supporting Issuers, Deals, and future entity types
-- **Entity-Specific Projectors** — `IssuerProjector`, `DealProjector`, `GenericDomainChangeProjector` with clear responsibilities
+- **Entity-Specific Projectors** — `IssuerProjector`, `DealProjector`, `InstrumentProjector`, `GenericDomainChangeProjector` with clear responsibilities
 - **Production Outbox Pattern** — Full transactional guarantees, deduplication, batching, and retention management
 - **Comprehensive Observability** — Structured logging, real-time diagnostics, performance metrics
 - **Modern .NET 8 Practices** — Records, nullable reference types, `PeriodicTimer`, `BackgroundService`
@@ -102,7 +102,7 @@ Add the new table to your `appsettings.json`:
     "Tables": [
       { "Schema": "dbo", "Name": "Issuers", "Pk": "IssuerID" },
       { "Schema": "dbo", "Name": "Deals", "Pk": "DealID" },
-      { "Schema": "dbo", "Name": "Positions", "Pk": "PositionID" }
+      { "Schema": "dbo", "Name": "InstrumentMaster", "Pk": "InstrumentID" }
     ]
   }
 }
@@ -111,7 +111,7 @@ Add the new table to your `appsettings.json`:
 #### Step 2: Enable SQL Change Tracking
 ```sql
 -- Enable change tracking for the new table
-ALTER TABLE dbo.Positions ENABLE CHANGE_TRACKING 
+ALTER TABLE dbo.InstrumentMaster ENABLE CHANGE_TRACKING 
 WITH (TRACK_COLUMNS_UPDATED = ON);
 ```
 
@@ -127,12 +127,12 @@ For rich domain events with custom DisplayName rules and PreImage/PostImage data
 
 #### Step 1: Enable SQL Change Tracking
 ```sql
-ALTER TABLE dbo.Positions ENABLE CHANGE_TRACKING 
+ALTER TABLE dbo.InstrumentMaster ENABLE CHANGE_TRACKING 
 WITH (TRACK_COLUMNS_UPDATED = ON);
 ```
 
 #### Step 2: Create Entity-Specific Projector
-Create `src/KLIM.Events.Service/Infrastructure/ChangeTracking/PositionProjector.cs`:
+Create `src/KLIM.Events.Service/Infrastructure/ChangeTracking/InstrumentProjector.cs`:
 
 ```csharp
 using KLIM.Events.Messaging.Contracts;
@@ -142,9 +142,9 @@ using System.Text.Json;
 namespace KLIM.Events.Service.Infrastructure.ChangeTracking;
 
 /// <summary>
-/// Projector for Position entities - converts raw change tracking data into DataChangedV1 events
+/// Projector for Instrument entities - converts raw change tracking data into DataChangedV1 events
 /// </summary>
-public sealed class PositionProjector : IChangeEventProjector
+public sealed class InstrumentProjector : IChangeEventProjector
 {
     private static readonly string EventType = typeof(DataChangedV1).AssemblyQualifiedName!;
     private readonly JsonSerializerOptions _json = new()
@@ -154,13 +154,13 @@ public sealed class PositionProjector : IChangeEventProjector
     };
 
     // SQL queries for current and historical data
-    private const string SQL_POSITION_CURRENT = "SELECT RowGUID, Symbol, Quantity FROM dbo.Positions WHERE PositionID = @id";
-    private const string SQL_POSITION_HISTORY = @"SELECT TOP (2) RowGUID, Symbol, Quantity, ValidFrom
-FROM dbo.Positions FOR SYSTEM_TIME ALL
-WHERE PositionID = @id ORDER BY ValidFrom DESC";
+    private const string SQL_INSTRUMENT_CURRENT = "SELECT RowGUID, InstrumentName, Ticker, CUSIP, ISIN FROM dbo.InstrumentMaster WHERE InstrumentID = @id";
+    private const string SQL_INSTRUMENT_HISTORY = @"SELECT TOP (2) RowGUID, InstrumentName, Ticker, CUSIP, ISIN, ValidFrom
+FROM dbo.InstrumentMaster FOR SYSTEM_TIME ALL
+WHERE InstrumentID = @id ORDER BY ValidFrom DESC";
 
     public bool Supports(string schema, string table)
-        => (schema, table) is ("dbo", "Positions");
+        => (schema, table) is ("dbo", "InstrumentMaster");
 
     public async Task<IEnumerable<OutboxInsert>> ProjectAsync(SqlConnection connection, SqlTransaction tx, ChangeTrackingPollingService.TableChangeBatch batch, CancellationToken ct)
     {
@@ -170,8 +170,8 @@ WHERE PositionID = @id ORDER BY ValidFrom DESC";
             // Implementation details - see README.md for full example
             var evt = new DataChangedV1(
                 EntityId: /* load from DB */,
-                EntityType: "Position",
-                DisplayName: /* custom logic */,
+                EntityType: "Instrument",
+                DisplayName: /* custom logic: Ticker ?? CUSIP ?? ISIN with InstrumentName */,
                 ChangeVersion: change.Version,
                 ChangedAt: DateTimeOffset.UtcNow,
                 ChangeSource: $"{batch.Schema}.{batch.Table}",
@@ -195,7 +195,7 @@ WHERE PositionID = @id ORDER BY ValidFrom DESC";
 #### Step 3: Register the Projector
 Add to `Program.cs`:
 ```csharp
-builder.Services.AddSingleton<IChangeEventProjector, PositionProjector>();
+builder.Services.AddSingleton<IChangeEventProjector, InstrumentProjector>();
 ```
 
 #### Step 4: Update Configuration
@@ -204,7 +204,7 @@ Add the table to `appsettings.json`:
 {
   "ChangeTracking": {
     "Tables": [
-      { "Schema": "dbo", "Name": "Positions", "Pk": "PositionID" }
+      { "Schema": "dbo", "Name": "InstrumentMaster", "Pk": "InstrumentID" }
     ]
   }
 }
@@ -218,7 +218,7 @@ Add the table to `appsettings.json`:
 - ✅ **Single Responsibility** — One projector per entity type
 - ✅ **Meaningful DisplayName** — Use business-friendly identifiers
 - ✅ **Rich PreImage/PostImage** — Include relevant fields for downstream processing
-- ✅ **Consistent EntityType** — Use singular nouns ("Position", "User", "Order")
+- ✅ **Consistent EntityType** — Use singular nouns ("Instrument", "User", "Order")
 - ✅ **Fallback Logic** — Handle missing data gracefully
 - ✅ **Error Handling** — Log warnings but don't fail the entire batch
 
@@ -528,7 +528,7 @@ public sealed class IssuerProjector : IChangeEventProjector
 // ✅ Good: Generic contract supporting multiple entity types
 public sealed record DataChangedV1(
     Guid EntityId,           // Universal entity identifier
-    string EntityType,       // "Issuer", "Deal", "Position", etc.
+    string EntityType,       // "Issuer", "Deal", "Instrument", etc.
     string DisplayName,      // Entity-specific primary identifier
     // ... other properties
 );
@@ -558,6 +558,12 @@ public sealed record DataChangedV2(
         "Name": "Deals", 
         "Pk": "DealID",
         "DisplayNameColumns": ["ShortName", "DealName"]
+      },
+      { 
+        "Schema": "dbo", 
+        "Name": "InstrumentMaster", 
+        "Pk": "InstrumentID",
+        "DisplayNameColumns": ["Ticker", "CUSIP", "ISIN", "InstrumentName"]
       }
     ]
   }
