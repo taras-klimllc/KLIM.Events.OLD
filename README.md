@@ -126,8 +126,8 @@ public sealed record DataChangeProcessed(
 #### Entity Type Mappings
 | Table | EntityType | DisplayName Logic |
 |-------|------------|-------------------|
-| `dbo.Issuers` | "Issuer" | `IssuerTicker` ?? `IssuerName` |
-| `dbo.Deals` | "Deal" | `ShortName` ?? `DealName` |
+| `dbo.Issuers` | "Issuer" | `IssuerName` ?? `IssuerReportingName` |
+| `dbo.Deals` | "Deal" | `DealName` ?? `DealDesc` |
 | `dbo.InstrumentMaster` | "Instrument" | `Ticker` ?? `CUSIP` ?? `ISIN` with `InstrumentName` |
 | Other tables | Dynamic | Table-specific logic |
 
@@ -240,8 +240,8 @@ Source: dbo.Issuers#12345 | ChangeVersion: 98765 | Duration: 23ms
 
 #### Change Details
 ```
-📋 CHANGE DETAILS: a1b2c3d4-e5f6... | U | Issuer: 12345-guid (AAPL) | 
-Changed: [IssuerName, LastUpdated] | PreImage[IssuerName: Apple Inc] | PostImage[IssuerName: Apple Inc.]
+📋 CHANGE DETAILS: a1b2c3d4-e5f6... | U | Issuer: 12345-guid (Sample Company Inc) | 
+Changed: [IssuerName, LastUpdated] | PreImage[IssuerName: Sample Company Inc] | PostImage[IssuerName: Sample Company Inc.]
 ```
 
 #### Batch Statistics

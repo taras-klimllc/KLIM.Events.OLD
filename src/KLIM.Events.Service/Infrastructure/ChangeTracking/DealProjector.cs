@@ -16,8 +16,8 @@ public sealed class DealProjector : IChangeEventProjector
         WriteIndented = false
     };
 
-    private const string SQL_DEAL_CURRENT = "SELECT RowGUID, ShortName, DealName FROM dbo.Deals WHERE DealID = @id";
-    private const string SQL_DEAL_HISTORY_WINDOW = @"SELECT TOP (2) RowGUID, ShortName, DealName, ValidFrom
+    private const string SQL_DEAL_CURRENT = "SELECT RowGUID, DealName, DealDesc FROM dbo.Deals WHERE DealID = @id";
+    private const string SQL_DEAL_HISTORY_WINDOW = @"SELECT TOP (2) RowGUID, DealName, DealDesc, ValidFrom
 FROM dbo.Deals FOR SYSTEM_TIME ALL
 WHERE DealID = @id
 ORDER BY ValidFrom DESC"; // newest then prior
@@ -43,12 +43,12 @@ ORDER BY ValidFrom DESC"; // newest then prior
                 {
                     var last = hist[0];
                     rowGuid = last.RowGuid;
-                    displayName = last.ShortName ?? last.DealName ?? $"DELETED-DEAL-{change.Id}";
+                    displayName = last.DealName ?? last.DealDesc ?? $"DELETED-DEAL-{change.Id}";
                     preImage = new Dictionary<string, object?>
                     {
                         ["RowGUID"] = last.RowGuid,
-                        ["ShortName"] = last.ShortName,
-                        ["DealName"] = last.DealName
+                        ["DealName"] = last.DealName,
+                        ["DealDesc"] = last.DealDesc
                     };
                 }
                 else
@@ -73,12 +73,12 @@ ORDER BY ValidFrom DESC"; // newest then prior
                 {
                     var last = hist[0];
                     rowGuid = last.RowGuid;
-                    displayName = last.ShortName ?? last.DealName ?? $"DEAL-{change.Id}";
+                    displayName = last.DealName ?? last.DealDesc ?? $"DEAL-{change.Id}";
                     postImage = new Dictionary<string, object?>
                     {
                         ["RowGUID"] = last.RowGuid,
-                        ["ShortName"] = last.ShortName,
-                        ["DealName"] = last.DealName
+                        ["DealName"] = last.DealName,
+                        ["DealDesc"] = last.DealDesc
                     };
                 }
                 if (hist.Count > 1)
@@ -87,8 +87,8 @@ ORDER BY ValidFrom DESC"; // newest then prior
                     preImage = new Dictionary<string, object?>
                     {
                         ["RowGUID"] = prev.RowGuid,
-                        ["ShortName"] = prev.ShortName,
-                        ["DealName"] = prev.DealName
+                        ["DealName"] = prev.DealName,
+                        ["DealDesc"] = prev.DealDesc
                     };
                 }
             }
@@ -143,9 +143,9 @@ ORDER BY ValidFrom DESC"; // newest then prior
         if (await rdr.ReadAsync(ct))
         {
             var guid = rdr.GetGuid(0);
-            var shortName = rdr.IsDBNull(1) ? null : rdr.GetString(1);
-            var dealName = rdr.IsDBNull(2) ? null : rdr.GetString(2);
-            return (guid, shortName ?? dealName);
+            var dealName = rdr.IsDBNull(1) ? null : rdr.GetString(1);
+            var dealDesc = rdr.IsDBNull(2) ? null : rdr.GetString(2);
+            return (guid, dealName ?? dealDesc);
         }
         return (Guid.Empty, null);
     }
@@ -160,12 +160,12 @@ ORDER BY ValidFrom DESC"; // newest then prior
         {
             list.Add(new HistRow(
                 RowGuid: rdr.GetGuid(0),
-                ShortName: rdr.IsDBNull(1) ? null : rdr.GetString(1),
-                DealName: rdr.IsDBNull(2) ? null : rdr.GetString(2)
+                DealName: rdr.IsDBNull(1) ? null : rdr.GetString(1),
+                DealDesc: rdr.IsDBNull(2) ? null : rdr.GetString(2)
             ));
         }
         return list;
     }
 
-    private sealed record HistRow(Guid RowGuid, string? ShortName, string? DealName);
+    private sealed record HistRow(Guid RowGuid, string? DealName, string? DealDesc);
 }

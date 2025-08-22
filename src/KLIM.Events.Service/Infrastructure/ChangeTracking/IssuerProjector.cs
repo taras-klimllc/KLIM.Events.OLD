@@ -16,8 +16,8 @@ public sealed class IssuerProjector : IChangeEventProjector
         WriteIndented = false
     };
 
-    private const string SQL_ISSUER_CURRENT = "SELECT RowGUID, IssuerTicker, IssuerName FROM dbo.Issuers WHERE IssuerID = @id";
-    private const string SQL_ISSUER_HISTORY_WINDOW = @"SELECT TOP (2) RowGUID, IssuerTicker, IssuerName, ValidFrom
+    private const string SQL_ISSUER_CURRENT = "SELECT RowGUID, IssuerName, IssuerReportingName FROM dbo.Issuers WHERE IssuerID = @id";
+    private const string SQL_ISSUER_HISTORY_WINDOW = @"SELECT TOP (2) RowGUID, IssuerName, IssuerReportingName, ValidFrom
 FROM dbo.Issuers FOR SYSTEM_TIME ALL
 WHERE IssuerID = @id
 ORDER BY ValidFrom DESC"; // newest then prior
@@ -43,12 +43,12 @@ ORDER BY ValidFrom DESC"; // newest then prior
                 {
                     var last = hist[0];
                     rowGuid = last.RowGuid;
-                    displayName = last.Ticker ?? last.Name ?? $"DELETED-ISSUER-{change.Id}";
+                    displayName = last.Name ?? last.ReportingName ?? $"DELETED-ISSUER-{change.Id}";
                     preImage = new Dictionary<string, object?>
                     {
                         ["RowGUID"] = last.RowGuid,
-                        ["IssuerTicker"] = last.Ticker,
-                        ["IssuerName"] = last.Name
+                        ["IssuerName"] = last.Name,
+                        ["IssuerReportingName"] = last.ReportingName
                     };
                 }
                 else
@@ -73,12 +73,12 @@ ORDER BY ValidFrom DESC"; // newest then prior
                 {
                     var last = hist[0];
                     rowGuid = last.RowGuid;
-                    displayName = last.Ticker ?? last.Name ?? $"ISSUER-{change.Id}";
+                    displayName = last.Name ?? last.ReportingName ?? $"ISSUER-{change.Id}";
                     postImage = new Dictionary<string, object?>
                     {
                         ["RowGUID"] = last.RowGuid,
-                        ["IssuerTicker"] = last.Ticker,
-                        ["IssuerName"] = last.Name
+                        ["IssuerName"] = last.Name,
+                        ["IssuerReportingName"] = last.ReportingName
                     };
                 }
                 if (hist.Count > 1)
@@ -87,8 +87,8 @@ ORDER BY ValidFrom DESC"; // newest then prior
                     preImage = new Dictionary<string, object?>
                     {
                         ["RowGUID"] = prev.RowGuid,
-                        ["IssuerTicker"] = prev.Ticker,
-                        ["IssuerName"] = prev.Name
+                        ["IssuerName"] = prev.Name,
+                        ["IssuerReportingName"] = prev.ReportingName
                     };
                 }
             }
@@ -143,9 +143,9 @@ ORDER BY ValidFrom DESC"; // newest then prior
         if (await rdr.ReadAsync(ct))
         {
             var guid = rdr.GetGuid(0);
-            var ticker = rdr.IsDBNull(1) ? null : rdr.GetString(1);
-            var name = rdr.IsDBNull(2) ? null : rdr.GetString(2);
-            return (guid, ticker ?? name);
+            var name = rdr.IsDBNull(1) ? null : rdr.GetString(1);
+            var reportingName = rdr.IsDBNull(2) ? null : rdr.GetString(2);
+            return (guid, name ?? reportingName);
         }
         return (Guid.Empty, null);
     }
@@ -160,12 +160,12 @@ ORDER BY ValidFrom DESC"; // newest then prior
         {
             list.Add(new HistRow(
                 RowGuid: rdr.GetGuid(0),
-                Ticker: rdr.IsDBNull(1) ? null : rdr.GetString(1),
-                Name: rdr.IsDBNull(2) ? null : rdr.GetString(2)
+                Name: rdr.IsDBNull(1) ? null : rdr.GetString(1),
+                ReportingName: rdr.IsDBNull(2) ? null : rdr.GetString(2)
             ));
         }
         return list;
     }
 
-    private sealed record HistRow(Guid RowGuid, string? Ticker, string? Name);
+    private sealed record HistRow(Guid RowGuid, string? Name, string? ReportingName);
 }

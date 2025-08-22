@@ -518,7 +518,7 @@ public sealed class IssuerProjector : IChangeEventProjector
     {
         // Entity-specific projection logic
         // Maps to EntityType = "Issuer"
-        // Uses IssuerTicker ?? IssuerName for DisplayName
+        // Uses IssuerName ?? IssuerReportingName for DisplayName
     }
 }
 ```
@@ -551,13 +551,13 @@ public sealed record DataChangedV2(
         "Schema": "dbo", 
         "Name": "Issuers", 
         "Pk": "IssuerID",
-        "DisplayNameColumns": ["IssuerTicker", "IssuerName"]
+        "DisplayNameColumns": ["IssuerName", "IssuerReportingName"]
       },
       { 
         "Schema": "dbo", 
         "Name": "Deals", 
         "Pk": "DealID",
-        "DisplayNameColumns": ["ShortName", "DealName"]
+        "DisplayNameColumns": ["DealName", "DealDesc"]
       },
       { 
         "Schema": "dbo", 
