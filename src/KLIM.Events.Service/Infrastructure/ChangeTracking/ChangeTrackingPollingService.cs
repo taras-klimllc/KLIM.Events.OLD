@@ -1,4 +1,4 @@
-using Azure.Core;
+﻿using Azure.Core;
 using Azure.Identity;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
@@ -205,6 +205,7 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
     private async Task<string[]> DecodeChangedColumnsAsync(SqlConnection conn, TrackedTable table, byte[]? mask, CancellationToken ct)
     {
         if (mask == null || mask.Length == 0) return Array.Empty<string>();
+        
         const string COL_SQL = @"SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(@obj) ORDER BY column_id";
         var cacheKey = $"{table.Schema}.{table.Name}";
         if (!_columnCache.TryGetValue(cacheKey, out var cols))
@@ -217,15 +218,24 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
             cols = list.ToArray();
             _columnCache[cacheKey] = cols;
         }
+
+        // SQL Server Change Tracking stores column IDs as 4-byte integers
         var changed = new List<string>();
-        for (int ordinal = 1; ordinal <= cols.Length; ordinal++)
+        
+        for (int i = 0; i < mask.Length; i += 4)
         {
-            int byteIndex = (ordinal - 1) / 8;
-            int bitIndex = (ordinal - 1) % 8;
-            if (byteIndex >= mask.Length) break;
-            if ((mask[byteIndex] & (1 << bitIndex)) != 0)
-                changed.Add(cols[ordinal - 1]);
+            if (i + 3 >= mask.Length) break;
+            
+            // Read 4-byte integer (little-endian)
+            int columnId = BitConverter.ToInt32(mask, i);
+            
+            // Column IDs are 1-based, our array is 0-based
+            if (columnId > 0 && columnId <= cols.Length)
+            {
+                changed.Add(cols[columnId - 1]);
+            }
         }
+            
         return changed.ToArray();
     }
 

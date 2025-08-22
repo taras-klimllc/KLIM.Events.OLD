@@ -1,36 +1,109 @@
 using KLIM.Events.Messaging.Contracts;
+using KLIM.Events.Service.Infrastructure.Outbox;
 using Microsoft.Data.SqlClient;
 using System.Text.Json;
 
 namespace KLIM.Events.Service.Infrastructure.ChangeTracking;
 
 /// <summary>
-/// Projector for Issuer entities - converts raw change tracking data into DataChangedV1 events
+/// Enhanced projector for Issuer entities - captures ALL business columns for comprehensive change events
 /// </summary>
 public sealed class IssuerProjector : IChangeEventProjector
 {
     private static readonly string EventType = typeof(DataChangedV1).AssemblyQualifiedName!;
+    private readonly ILogger<IssuerProjector>? _logger;
     private readonly JsonSerializerOptions _json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false
     };
 
-    private const string SQL_ISSUER_CURRENT = "SELECT RowGUID, IssuerName, IssuerReportingName FROM dbo.Issuers WHERE IssuerID = @id";
-    private const string SQL_ISSUER_HISTORY_WINDOW = @"SELECT TOP (2) RowGUID, IssuerName, IssuerReportingName, ValidFrom
-FROM dbo.Issuers FOR SYSTEM_TIME ALL
-WHERE IssuerID = @id
-ORDER BY ValidFrom DESC"; // newest then prior
+    public IssuerProjector(ILogger<IssuerProjector>? logger = null)
+    {
+        _logger = logger;
+    }
 
-    public bool Supports(string schema, string table)
-        => (schema, table) is ("dbo", "Issuers");
+    // Comprehensive SQL - all business columns from schema
+    private const string SQL_ISSUER_CURRENT = @"
+        SELECT 
+            RowGUID, IssuerID, IssuerName, IssuerDesc, IssuerTicker, 
+            FigiID, BBGID, IssuerReportingName, BorrowerName, CountryId, 
+            VerticalID, MoodysIndustryId, IssuerESGCode, Performing, PublicIssuer, 
+            DealLeadID, ParentIssuerID, HSIssuerID, VPMIssuerID, SSIssuerID, 
+            WSOIssuerID, PBIIssuerID, ReorgIssuerID, IsBDC, StatusCode, 
+            CreatedBy, Created, LastUpdatedBy, LastUpdated, 
+            FinalReview, YodaIssuerID, FindoxIssuerID, Restricted, 
+            RestrictionStartDate, RestrictionEndDate, LastRestricted, RestrictedBy, 
+            RestrictionRemovedBy, RestrictionRemovedOn, RestrictedFlag, Owner, 
+            RestrictionReason, SNPIndustryID, GICSIndustryCodeID, GICSSubIndustryId
+        FROM dbo.Issuers 
+        WHERE IssuerID = @id";
+
+    // Historical query for temporal tables - same columns as current
+    private const string SQL_ISSUER_HISTORY_WINDOW = @"
+        SELECT TOP (2) 
+            RowGUID, IssuerID, IssuerName, IssuerDesc, IssuerTicker, 
+            FigiID, BBGID, IssuerReportingName, BorrowerName, CountryId, 
+            VerticalID, MoodysIndustryId, IssuerESGCode, Performing, PublicIssuer, 
+            DealLeadID, ParentIssuerID, HSIssuerID, VPMIssuerID, SSIssuerID, 
+            WSOIssuerID, PBIIIssuerID, ReorgIssuerID, IsBDC, StatusCode, 
+            CreatedBy, Created, LastUpdatedBy, LastUpdated, 
+            FinalReview, YodaIssuerID, FindoxIssuerID, Restricted, 
+            RestrictionStartDate, RestrictionEndDate, LastRestricted, RestrictedBy, 
+            RestrictionRemovedBy, RestrictionRemovedOn, RestrictedFlag, Owner, 
+            RestrictionReason, SNPIndustryID, GICSIndustryCodeID, GICSSubIndustryId,
+            ValidFrom
+        FROM dbo.Issuers FOR SYSTEM_TIME ALL
+        WHERE IssuerID = @id
+        ORDER BY ValidFrom DESC"; // newest then prior
+
+    // Audit fields to exclude from business change filtering  
+    private static readonly HashSet<string> AuditFields = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ledger_start_transaction_id", "ledger_end_transaction_id",
+        "ledger_start_sequence_number", "ledger_end_sequence_number", 
+        "ValidFrom", "ValidTo"
+    };
+
+    public bool Supports(string schema, string table) => (schema, table) is ("dbo", "Issuers");
 
     public async Task<IEnumerable<OutboxInsert>> ProjectAsync(SqlConnection connection, SqlTransaction tx, ChangeTrackingPollingService.TableChangeBatch batch, CancellationToken ct)
     {
         var inserts = new List<OutboxInsert>(batch.Changes.Count);
+        
         foreach (var change in batch.Changes)
         {
             var op = change.Operation;
+            
+            // Filter audit-only changes 
+            if (op == "U")
+            {
+                var businessChangedFields = change.ChangedColumns
+                    .Where(field => !AuditFields.Contains(field))
+                    .ToArray();
+                
+                // Log detected changes for monitoring
+                _logger?.LogDebug("Change tracking detected for Issuer {EntityId} (version {ChangeVersion}): Business[{BusinessFields}] | Audit[{AuditFields}]", 
+                    change.Id, change.Version, 
+                    string.Join(", ", businessChangedFields),
+                    string.Join(", ", change.ChangedColumns.Except(businessChangedFields)));
+                
+                // Skip audit-only updates
+                if (businessChangedFields.Length == 0)
+                {
+                    _logger?.LogDebug("Skipping audit-only update for Issuer {EntityId} (version {ChangeVersion}): [{AuditFields}]", 
+                        change.Id, change.Version, string.Join(", ", change.ChangedColumns));
+                    continue;
+                }
+                
+                if (businessChangedFields.Length < change.ChangedColumns.Length)
+                {
+                    var auditOnlyFields = change.ChangedColumns.Except(businessChangedFields).ToArray();
+                    _logger?.LogDebug("Processing mixed update for Issuer {EntityId}: Business[{BusinessFields}] + Audit[{AuditFields}]", 
+                        change.Id, string.Join(", ", businessChangedFields), string.Join(", ", auditOnlyFields));
+                }
+            }
+
             Guid rowGuid = Guid.Empty;
             string displayName = string.Empty;
             Dictionary<string, object?>? preImage = null;
@@ -41,15 +114,9 @@ ORDER BY ValidFrom DESC"; // newest then prior
                 var hist = await LoadHistoryWindowAsync(connection, tx, change.Id, ct);
                 if (hist.Count > 0)
                 {
-                    var last = hist[0];
-                    rowGuid = last.RowGuid;
-                    displayName = last.Name ?? last.ReportingName ?? $"DELETED-ISSUER-{change.Id}";
-                    preImage = new Dictionary<string, object?>
-                    {
-                        ["RowGUID"] = last.RowGuid,
-                        ["IssuerName"] = last.Name,
-                        ["IssuerReportingName"] = last.ReportingName
-                    };
+                    rowGuid = hist[0].RowGuid;
+                    displayName = GetDisplayName(hist[0].Data);
+                    preImage = hist[0].Data; // Full business data before deletion
                 }
                 else
                 {
@@ -58,45 +125,36 @@ ORDER BY ValidFrom DESC"; // newest then prior
             }
             else if (op == "I")
             {
-                (rowGuid, var nullableDisplayName) = await LoadCurrentAsync(connection, tx, change.Id, ct);
-                displayName = nullableDisplayName ?? $"ISSUER-{change.Id}";
-                postImage = new Dictionary<string, object?>
+                var current = await LoadCurrentAsync(connection, tx, change.Id, ct);
+                if (current.HasValue)
                 {
-                    ["RowGUID"] = rowGuid,
-                    ["DisplayName"] = displayName
-                };
+                    rowGuid = current.Value.RowGuid;
+                    displayName = GetDisplayName(current.Value.Data);
+                    postImage = current.Value.Data; // Full business data after insert
+                }
+                else
+                {
+                    displayName = $"ISSUER-{change.Id}";
+                }
             }
             else if (op == "U")
             {
                 var hist = await LoadHistoryWindowAsync(connection, tx, change.Id, ct);
                 if (hist.Count > 0)
                 {
-                    var last = hist[0];
-                    rowGuid = last.RowGuid;
-                    displayName = last.Name ?? last.ReportingName ?? $"ISSUER-{change.Id}";
-                    postImage = new Dictionary<string, object?>
-                    {
-                        ["RowGUID"] = last.RowGuid,
-                        ["IssuerName"] = last.Name,
-                        ["IssuerReportingName"] = last.ReportingName
-                    };
+                    rowGuid = hist[0].RowGuid;
+                    displayName = GetDisplayName(hist[0].Data);
+                    postImage = hist[0].Data; // Full business data after update
                 }
                 if (hist.Count > 1)
                 {
-                    var prev = hist[1];
-                    preImage = new Dictionary<string, object?>
-                    {
-                        ["RowGUID"] = prev.RowGuid,
-                        ["IssuerName"] = prev.Name,
-                        ["IssuerReportingName"] = prev.ReportingName
-                    };
+                    preImage = hist[1].Data; // Full business data before update
                 }
             }
 
-            if (rowGuid == Guid.Empty)
-                rowGuid = Guid.NewGuid(); // fallback
-            if (string.IsNullOrWhiteSpace(displayName))
-                displayName = $"ISSUER-{change.Id}";
+            // Fallback handling
+            if (rowGuid == Guid.Empty) rowGuid = Guid.NewGuid();
+            if (string.IsNullOrWhiteSpace(displayName)) displayName = $"ISSUER-{change.Id}";
 
             var changedFields = op switch
             {
@@ -135,37 +193,95 @@ ORDER BY ValidFrom DESC"; // newest then prior
         return inserts;
     }
 
-    private static async Task<(Guid RowGuid, string? DisplayName)> LoadCurrentAsync(SqlConnection conn, SqlTransaction tx, object pk, CancellationToken ct)
+    // Extract all columns to dictionary dynamically with safety checks
+    private async Task<(Guid RowGuid, Dictionary<string, object?> Data)?> LoadCurrentAsync(SqlConnection conn, SqlTransaction tx, object pk, CancellationToken ct)
     {
-        await using var cmd = new SqlCommand(SQL_ISSUER_CURRENT, conn, tx);
-        cmd.Parameters.AddWithValue("@id", pk);
-        await using var rdr = await cmd.ExecuteReaderAsync(ct);
-        if (await rdr.ReadAsync(ct))
+        try
         {
-            var guid = rdr.GetGuid(0);
-            var name = rdr.IsDBNull(1) ? null : rdr.GetString(1);
-            var reportingName = rdr.IsDBNull(2) ? null : rdr.GetString(2);
-            return (guid, name ?? reportingName);
+            await using var cmd = new SqlCommand(SQL_ISSUER_CURRENT, conn, tx);
+            cmd.Parameters.AddWithValue("@id", pk);
+            await using var rdr = await cmd.ExecuteReaderAsync(ct);
+            if (await rdr.ReadAsync(ct))
+            {
+                var guid = rdr.GetGuid(0); // RowGUID is first column
+                var data = new Dictionary<string, object?>();
+                
+                // Extract all columns dynamically
+                for (int i = 0; i < rdr.FieldCount; i++)
+                {
+                    var fieldName = rdr.GetName(i);
+                    data[fieldName] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+                }
+                
+                // Apply payload sanitization for large text fields
+                var sanitizedData = MessagePublisher.SanitizePayloadData(data);
+                return (guid, sanitizedData);
+            }
         }
-        return (Guid.Empty, null);
+        catch (Exception ex)
+        {
+            // Enhanced error handling - log but don't fail the batch
+            using var scope = _logger?.BeginScope(new Dictionary<string, object> { ["PrimaryKey"] = pk.ToString() ?? "null", ["Operation"] = "LoadCurrent" });
+            _logger?.LogWarning(ex, "Failed to load current data for Issuer {PrimaryKey}, using fallback", pk);
+        }
+        
+        return null;
     }
 
-    private static async Task<List<HistRow>> LoadHistoryWindowAsync(SqlConnection conn, SqlTransaction tx, object pk, CancellationToken ct)
+    private async Task<List<HistRow>> LoadHistoryWindowAsync(SqlConnection conn, SqlTransaction tx, object pk, CancellationToken ct)
     {
-        await using var cmd = new SqlCommand(SQL_ISSUER_HISTORY_WINDOW, conn, tx);
-        cmd.Parameters.AddWithValue("@id", pk);
-        await using var rdr = await cmd.ExecuteReaderAsync(ct);
         var list = new List<HistRow>();
-        while (await rdr.ReadAsync(ct))
+        
+        try
         {
-            list.Add(new HistRow(
-                RowGuid: rdr.GetGuid(0),
-                Name: rdr.IsDBNull(1) ? null : rdr.GetString(1),
-                ReportingName: rdr.IsDBNull(2) ? null : rdr.GetString(2)
-            ));
+            await using var cmd = new SqlCommand(SQL_ISSUER_HISTORY_WINDOW, conn, tx);
+            cmd.Parameters.AddWithValue("@id", pk);
+            await using var rdr = await cmd.ExecuteReaderAsync(ct);
+            while (await rdr.ReadAsync(ct))
+            {
+                var guid = rdr.GetGuid(0); // RowGUID is first column
+                var data = new Dictionary<string, object?>();
+                
+                for (int i = 0; i < rdr.FieldCount; i++)
+                {
+                    var fieldName = rdr.GetName(i);
+                    if (fieldName != "ValidFrom") // Exclude temporal metadata from payload
+                    {
+                        data[fieldName] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+                    }
+                }
+                
+                // Apply payload sanitization for large text fields
+                var sanitizedData = MessagePublisher.SanitizePayloadData(data);
+                list.Add(new HistRow(guid, sanitizedData));
+            }
         }
+        catch (Exception ex)
+        {
+            // Enhanced error handling - log warning but return what we have
+            using var scope = _logger?.BeginScope(new Dictionary<string, object> { ["PrimaryKey"] = pk.ToString() ?? "null", ["Operation"] = "LoadHistory" });
+            _logger?.LogWarning(ex, "Failed to load complete history for Issuer {PrimaryKey}, using partial data (count: {Count})", pk, list.Count);
+        }
+        
         return list;
     }
 
-    private sealed record HistRow(Guid RowGuid, string? Name, string? ReportingName);
+    // Create meaningful display names with ticker and identifiers
+    private static string GetDisplayName(Dictionary<string, object?> data)
+    {
+        var name = data.GetValueOrDefault("IssuerName")?.ToString();
+        var ticker = data.GetValueOrDefault("IssuerTicker")?.ToString();
+        var reportingName = data.GetValueOrDefault("IssuerReportingName")?.ToString();
+        var bbgId = data.GetValueOrDefault("BBGID")?.ToString();
+        
+        return ticker switch
+        {
+            not null when name != null => $"{ticker} ({name})",
+            not null => $"{ticker} ({reportingName ?? "No Name"})",
+            null when bbgId != null => $"{bbgId} ({name ?? reportingName ?? "No Name"})", 
+            _ => name ?? reportingName ?? "Unknown Issuer"
+        };
+    }
+
+    private sealed record HistRow(Guid RowGuid, Dictionary<string, object?> Data);
 }

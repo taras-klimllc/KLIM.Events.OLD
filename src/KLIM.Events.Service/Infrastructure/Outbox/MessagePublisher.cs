@@ -1,11 +1,11 @@
-using KLIM.Events.Messaging.Contracts;
+﻿using KLIM.Events.Messaging.Contracts;
 using MassTransit;
 using System.Text.Json;
 
 namespace KLIM.Events.Service.Infrastructure.Outbox;
 
 /// <summary>
-/// Handles message publishing to RabbitMQ via MassTransit
+/// Handles message publishing to RabbitMQ via MassTransit with payload monitoring and optimization
 /// </summary>
 public sealed class MessagePublisher
 {
@@ -16,6 +16,11 @@ public sealed class MessagePublisher
         PropertyNameCaseInsensitive = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
+
+    // Payload size monitoring and safety limits
+    private const int MAX_PAYLOAD_SIZE_BYTES = 2 * 1024 * 1024; // 2MB reasonable limit
+    private const int LARGE_PAYLOAD_THRESHOLD = 500 * 1024; // 500KB warning threshold
+    private const int MAX_TEXT_FIELD_LENGTH = 10 * 1024; // 10KB per text field
 
     public MessagePublisher(IBus bus, ILogger<MessagePublisher> logger)
     {
@@ -39,12 +44,23 @@ public sealed class MessagePublisher
             return PublishResult.Failed("Deserialization failed");
         }
 
+        // Payload size monitoring and safety checks
+        var payloadSizeBytes = System.Text.Encoding.UTF8.GetByteCount(message.Payload);
+        MonitorPayloadSize(message.Id, payloadSizeBytes);
+
+        if (payloadSizeBytes > MAX_PAYLOAD_SIZE_BYTES)
+        {
+            _logger.LogError("Payload too large: {PayloadSize}KB for message {Id}, max allowed: {MaxSize}KB", 
+                payloadSizeBytes / 1024, message.Id, MAX_PAYLOAD_SIZE_BYTES / 1024);
+            return PublishResult.Failed($"Payload too large: {payloadSizeBytes / 1024}KB");
+        }
+
         var headers = ParseHeaders(message.Headers);
         var exchange = GetExchange(messageType);
         var routingKey = GetRoutingKey(messageType);
 
-        _logger.LogDebug("Publishing message {Id} to exchange {Exchange} with routing key {RoutingKey}", 
-            message.Id, exchange, routingKey);
+        _logger.LogDebug("Publishing message {Id} to exchange {Exchange} with routing key {RoutingKey} (size: {PayloadSize}KB)", 
+            message.Id, exchange, routingKey, payloadSizeBytes / 1024);
 
         // Use the correct routing - publish to the topic exchange with routing key
         await _bus.Publish(messageObj, ctx =>
@@ -56,14 +72,12 @@ public sealed class MessagePublisher
             }
             ctx.MessageId = message.Id;
             ctx.Headers.Set("OccurredAt", message.OccurredAt.ToString("O"));
+            ctx.Headers.Set("PayloadSizeKB", (payloadSizeBytes / 1024).ToString()); // Add size info
             
-            // Ensure we're publishing to the correct exchange with the routing key
-            // ctx.Headers.Set("Exchange", exchange);
-            // ctx.Headers.Set("RoutingKey", routingKey);
         }, cancellationToken);
 
-        _logger.LogInformation("Successfully published message {Id} to {Exchange}/{RoutingKey}", 
-            message.Id, exchange, routingKey);
+        _logger.LogInformation("Successfully published message {Id} to {Exchange}/{RoutingKey} (size: {PayloadSize}KB)", 
+            message.Id, exchange, routingKey, payloadSizeBytes / 1024);
 
         var changeDetails = ExtractChangeDetails(messageObj);
         return PublishResult.Success(exchange, routingKey, changeDetails);
@@ -113,13 +127,72 @@ public sealed class MessagePublisher
     {
         if (image?.Any() != true) return string.Empty;
 
-        var details = image.Select(kvp =>
+        // Show first 8 most important fields, with better formatting
+        var details = image.Take(8).Select(kvp =>
         {
             var value = kvp.Value?.ToString() ?? "null";
-            return $"{kvp.Key}: {(value.Length > 100 ? value[..97] + "..." : value)}";
+            // Truncate long values but keep them readable
+            var displayValue = value.Length > 50 ? value[..47] + "..." : value;
+            return $"{kvp.Key}: {displayValue}";
         });
 
-        return $"{prefix}[{string.Join(", ", details)}]";
+        var fieldCount = image.Count;
+        var summary = $"{prefix}[{string.Join(", ", details)}]";
+        
+        // Show how many more fields are available
+        if (fieldCount > 8)
+        {
+            summary += $" +{fieldCount - 8} more fields";
+        }
+        
+        return summary;
+    }
+
+    // Payload size monitoring
+    private void MonitorPayloadSize(Guid messageId, int payloadSizeBytes)
+    {
+        if (payloadSizeBytes > LARGE_PAYLOAD_THRESHOLD)
+        {
+            using var scope = _logger.BeginScope(new Dictionary<string, object>
+            {
+                ["MessageId"] = messageId,
+                ["PayloadSizeBytes"] = payloadSizeBytes,
+                ["PayloadSizeKB"] = payloadSizeBytes / 1024,
+                ["PayloadSizeMB"] = payloadSizeBytes / (1024.0 * 1024.0)
+            });
+
+            _logger.LogWarning("Large payload detected: {PayloadSize}KB for message {MessageId} (threshold: {Threshold}KB)", 
+                payloadSizeBytes / 1024, messageId, LARGE_PAYLOAD_THRESHOLD / 1024);
+        }
+        else
+        {
+            _logger.LogDebug("Payload size: {PayloadSize}KB for message {MessageId}", 
+                payloadSizeBytes / 1024, messageId);
+        }
+    }
+
+    // Utility method for projectors to sanitize large text fields
+    public static Dictionary<string, object?> SanitizePayloadData(Dictionary<string, object?> data)
+    {
+        var sanitized = new Dictionary<string, object?>(data.Count);
+        
+        foreach (var kvp in data)
+        {
+            var value = kvp.Value;
+            if (value is string str && str.Length > MAX_TEXT_FIELD_LENGTH)
+            {
+                // Truncate very large text fields
+                sanitized[kvp.Key] = str[..(MAX_TEXT_FIELD_LENGTH - 100)] + $"... [TRUNCATED - original length: {str.Length} chars]";
+                sanitized[$"{kvp.Key}_Truncated"] = true;
+                sanitized[$"{kvp.Key}_OriginalLength"] = str.Length;
+            }
+            else
+            {
+                sanitized[kvp.Key] = value;
+            }
+        }
+        
+        return sanitized;
     }
 }
 

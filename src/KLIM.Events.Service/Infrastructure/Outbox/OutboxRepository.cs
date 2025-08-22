@@ -26,108 +26,49 @@ DELETE TOP(@maxRows) FROM dbo.OutboxMessages
 WHERE DispatchedAt IS NOT NULL 
   AND DispatchedAt < DATEADD(DAY, -@retentionDays, GETUTCDATE())";
 
+    // New non-destructive schema ensure script (preserves existing data)
     private const string SQL_ENSURE_SCHEMA = @"
--- Robust outbox schema initialization with complete cleanup
 BEGIN TRY
     BEGIN TRANSACTION;
-    
-    -- Step 1: Force drop everything related to OutboxMessages to ensure clean state
-    -- This approach is more reliable than trying to selectively clean orphaned objects
-    
-    -- Drop indexes first (if they exist)
-    IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_OutboxMessages_MessageKey')
+
+    -- Create table if missing (non-destructive)
+    IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'OutboxMessages' AND schema_id = SCHEMA_ID('dbo'))
     BEGIN
-        DECLARE @table_name_1 NVARCHAR(256);
-        SELECT @table_name_1 = SCHEMA_NAME(t.schema_id) + '.' + t.name 
-        FROM sys.indexes i 
-        JOIN sys.tables t ON i.object_id = t.object_id 
-        WHERE i.name = 'UX_OutboxMessages_MessageKey';
-        
-        IF @table_name_1 IS NOT NULL
-            EXEC('DROP INDEX UX_OutboxMessages_MessageKey ON ' + @table_name_1);
+        CREATE TABLE dbo.OutboxMessages
+        (
+            Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_OutboxMessages PRIMARY KEY,
+            Type NVARCHAR(400) NOT NULL,
+            Payload NVARCHAR(MAX) NOT NULL,
+            Headers NVARCHAR(MAX) NULL,
+            OccurredAt DATETIME2(7) NOT NULL CONSTRAINT DF_OutboxMessages_OccurredAt DEFAULT (SYSUTCDATETIME()),
+            DispatchedAt DATETIME2(7) NULL,
+            MessageKey NVARCHAR(256) NULL,
+            SourceEntity NVARCHAR(128) NULL,
+            SourceId NVARCHAR(128) NULL,
+            ChangeVersion BIGINT NULL
+        );
     END
-    
-    IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_OutboxMessages_Pending')
-    BEGIN
-        DECLARE @table_name_2 NVARCHAR(256);
-        SELECT @table_name_2 = SCHEMA_NAME(t.schema_id) + '.' + t.name 
-        FROM sys.indexes i 
-        JOIN sys.tables t ON i.object_id = t.object_id 
-        WHERE i.name = 'IX_OutboxMessages_Pending';
-        
-        IF @table_name_2 IS NOT NULL
-            EXEC('DROP INDEX IX_OutboxMessages_Pending ON ' + @table_name_2);
-    END
-    
-    IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_OutboxMessages_DispatchedAt')
-    BEGIN
-        DECLARE @table_name_3 NVARCHAR(256);
-        SELECT @table_name_3 = SCHEMA_NAME(t.schema_id) + '.' + t.name 
-        FROM sys.indexes i 
-        JOIN sys.tables t ON i.object_id = t.object_id 
-        WHERE i.name = 'IX_OutboxMessages_DispatchedAt';
-        
-        IF @table_name_3 IS NOT NULL
-            EXEC('DROP INDEX IX_OutboxMessages_DispatchedAt ON ' + @table_name_3);
-    END
-    
-    -- Drop primary key constraint if it exists
-    IF EXISTS (SELECT 1 FROM sys.key_constraints WHERE name = 'PK_OutboxMessages')
-    BEGIN
-        DECLARE @pk_table_name NVARCHAR(256);
-        SELECT @pk_table_name = SCHEMA_NAME(t.schema_id) + '.' + t.name 
-        FROM sys.key_constraints k 
-        JOIN sys.tables t ON k.parent_object_id = t.object_id 
-        WHERE k.name = 'PK_OutboxMessages';
-        
-        IF @pk_table_name IS NOT NULL
-            EXEC('ALTER TABLE ' + @pk_table_name + ' DROP CONSTRAINT PK_OutboxMessages');
-    END
-    
-    -- Drop default constraint if it exists
-    IF EXISTS (SELECT 1 FROM sys.default_constraints WHERE name = 'DF_OutboxMessages_OccurredAt')
-    BEGIN
-        DECLARE @df_table_name NVARCHAR(256);
-        SELECT @df_table_name = SCHEMA_NAME(t.schema_id) + '.' + t.name 
-        FROM sys.default_constraints d 
-        JOIN sys.tables t ON d.parent_object_id = t.object_id 
-        WHERE d.name = 'DF_OutboxMessages_OccurredAt';
-        
-        IF @df_table_name IS NOT NULL
-            EXEC('ALTER TABLE ' + @df_table_name + ' DROP CONSTRAINT DF_OutboxMessages_OccurredAt');
-    END
-    
-    -- Drop table if it exists
-    IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'OutboxMessages' AND schema_id = SCHEMA_ID('dbo'))
-    BEGIN
-        DROP TABLE dbo.OutboxMessages;
-    END
-    
-    -- Step 2: Create the complete OutboxMessages table
-    CREATE TABLE dbo.OutboxMessages
-    (
-        Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_OutboxMessages PRIMARY KEY,
-        Type NVARCHAR(400) NOT NULL,
-        Payload NVARCHAR(MAX) NOT NULL,
-        Headers NVARCHAR(MAX) NULL,
-        OccurredAt DATETIME2(7) NOT NULL CONSTRAINT DF_OutboxMessages_OccurredAt DEFAULT (SYSUTCDATETIME()),
-        DispatchedAt DATETIME2(7) NULL,
-        MessageKey NVARCHAR(256) NULL,
-        SourceEntity NVARCHAR(128) NULL,
-        SourceId NVARCHAR(128) NULL,
-        ChangeVersion BIGINT NULL
-    );
-    
-    -- Create indexes
-    CREATE UNIQUE INDEX UX_OutboxMessages_MessageKey ON dbo.OutboxMessages (MessageKey) WHERE MessageKey IS NOT NULL;
-    CREATE INDEX IX_OutboxMessages_Pending ON dbo.OutboxMessages (DispatchedAt, OccurredAt) INCLUDE (Type, Payload, Headers) WHERE DispatchedAt IS NULL;
-    CREATE INDEX IX_OutboxMessages_DispatchedAt ON dbo.OutboxMessages (DispatchedAt) INCLUDE (OccurredAt);
-    
+
+    -- Add missing columns if future migrations added them (example pattern)
+    IF COL_LENGTH('dbo.OutboxMessages', 'MessageKey') IS NULL ALTER TABLE dbo.OutboxMessages ADD MessageKey NVARCHAR(256) NULL;
+    IF COL_LENGTH('dbo.OutboxMessages', 'SourceEntity') IS NULL ALTER TABLE dbo.OutboxMessages ADD SourceEntity NVARCHAR(128) NULL;
+    IF COL_LENGTH('dbo.OutboxMessages', 'SourceId') IS NULL ALTER TABLE dbo.OutboxMessages ADD SourceId NVARCHAR(128) NULL;
+    IF COL_LENGTH('dbo.OutboxMessages', 'ChangeVersion') IS NULL ALTER TABLE dbo.OutboxMessages ADD ChangeVersion BIGINT NULL;
+
+    -- Create / recreate indexes only if they do not exist
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_OutboxMessages_MessageKey' AND object_id = OBJECT_ID('dbo.OutboxMessages'))
+        CREATE UNIQUE INDEX UX_OutboxMessages_MessageKey ON dbo.OutboxMessages (MessageKey) WHERE MessageKey IS NOT NULL;
+
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_OutboxMessages_Pending' AND object_id = OBJECT_ID('dbo.OutboxMessages'))
+        CREATE INDEX IX_OutboxMessages_Pending ON dbo.OutboxMessages (DispatchedAt, OccurredAt) INCLUDE (Type, Payload, Headers) WHERE DispatchedAt IS NULL;
+
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_OutboxMessages_DispatchedAt' AND object_id = OBJECT_ID('dbo.OutboxMessages'))
+        CREATE INDEX IX_OutboxMessages_DispatchedAt ON dbo.OutboxMessages (DispatchedAt) INCLUDE (OccurredAt);
+
     COMMIT TRANSACTION;
 END TRY
 BEGIN CATCH
-    IF @@TRANCOUNT > 0
-        ROLLBACK TRANSACTION;
+    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
     THROW;
 END CATCH";
 
