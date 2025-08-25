@@ -139,10 +139,22 @@ END CATCH";
     private async Task<SqlConnection> CreateConnectionAsync(string connectionString, bool useAzureAd, CancellationToken cancellationToken)
     {
         var conn = new SqlConnection(connectionString);
-        if (useAzureAd)
+        
+        // Check if connection string already has Azure AD authentication configured
+        var csBuilder = new SqlConnectionStringBuilder(connectionString);
+        var hasAzureAdAuth = csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDefault ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryIntegrated ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryInteractive ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryManagedIdentity ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryServicePrincipal ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow;
+        
+        // Only set AccessToken if using Azure AD but connection string doesn't already specify Azure AD authentication
+        if (useAzureAd && !hasAzureAdAuth)
         {
             conn.AccessToken = await _authService.AcquireTokenAsync(cancellationToken);
         }
+        
         return conn;
     }
 }

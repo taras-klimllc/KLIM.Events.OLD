@@ -48,7 +48,8 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
     private const string LEGACY_SQL_LOGIN = "im_api_admin";
 
     private readonly ILogger<ChangeTrackingPollingService> _log;
-    private readonly IOptions<ChangeTrackingOptions> _opt;
+    private readonly ChangeTrackingOptions _opt;
+    private readonly DatabaseOptions _databaseOpt;
     private readonly IEnumerable<IChangeEventProjector> _projectors;
     private readonly IOutboxWriter _outboxWriter;
 
@@ -61,32 +62,32 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
     public ChangeTrackingPollingService(
         ILogger<ChangeTrackingPollingService> log,
         IOptions<ChangeTrackingOptions> opt,
+        IOptions<DatabaseOptions> databaseOpt,
         IEnumerable<IChangeEventProjector> projectors,
         IOutboxWriter outboxWriter)
-        => (_log, _opt, _projectors, _outboxWriter) = (log, opt, projectors, outboxWriter);
+        => (_log, _opt, _databaseOpt, _projectors, _outboxWriter) = (log, opt.Value, databaseOpt.Value, projectors, outboxWriter);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var cfg = _opt.Value;
-        var interval = TimeSpan.FromSeconds(cfg.PollingIntervalSeconds);
-        if (string.IsNullOrWhiteSpace(cfg.ConnectionString))
+        var interval = TimeSpan.FromSeconds(_opt.PollingIntervalSeconds);
+        if (string.IsNullOrWhiteSpace(_databaseOpt.ConnectionString))
         {
-            _log.LogWarning("ChangeTracking connection string empty; poller disabled.");
+            _log.LogWarning("Database connection string empty; poller disabled.");
             return;
         }
 
-        var cleanConnStr = SanitizeForAzureAd(cfg.ConnectionString, cfg.UseAzureAd);
-        WarnIfLegacyLogin(cleanConnStr, cfg.UseAzureAd);
+        var cleanConnStr = SanitizeForAzureAd(_databaseOpt.ConnectionString, _databaseOpt.UseAzureAd);
+        WarnIfLegacyLogin(cleanConnStr, _databaseOpt.UseAzureAd);
 
         _log.LogInformation("ChangeTracking poller started. Interval={Interval}s BatchSize={Batch} UseAzureAd={UseAzureAd} Tables={Tables}",
-            cfg.PollingIntervalSeconds, cfg.BatchSize, cfg.UseAzureAd, string.Join(',', GetTrackedTables(cfg).Select(t => $"{t.Schema}.{t.Name}")));
+            _opt.PollingIntervalSeconds, _opt.BatchSize, _databaseOpt.UseAzureAd, string.Join(',', GetTrackedTables(_opt).Select(t => $"{t.Schema}.{t.Name}")));
 
         using var timer = new PeriodicTimer(interval);
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await PollCycleAsync(cleanConnStr, cfg.BatchSize, cfg.UseAzureAd, stoppingToken);
+                await PollCycleAsync(cleanConnStr, _opt.BatchSize, _databaseOpt.UseAzureAd, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -123,7 +124,7 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
         await conn.OpenAsync(ct);
         await EnsureCursorTableAsync(conn, ct);
 
-        var cfgTables = GetTrackedTables(_opt.Value).ToList();
+        var cfgTables = GetTrackedTables(_opt).ToList();
         foreach (var table in cfgTables)
         {
             ct.ThrowIfCancellationRequested();
@@ -246,14 +247,28 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
         if (useAzureAd) return;
         var csBuilder = new SqlConnectionStringBuilder(connectionString);
         if (!string.IsNullOrWhiteSpace(csBuilder.UserID) && csBuilder.UserID.Equals(LEGACY_SQL_LOGIN, StringComparison.OrdinalIgnoreCase))
-            _log.LogWarning("Connection string uses legacy SQL login '{Login}'. Set ChangeTracking:UseAzureAd=true for AAD.", LEGACY_SQL_LOGIN);
+            _log.LogWarning("Connection string uses legacy SQL login '{Login}'. Set Database:UseAzureAd=true for AAD.", LEGACY_SQL_LOGIN);
     }
 
     private SqlConnection CreateConnection(string connectionString, bool useAzureAd, CancellationToken ct)
     {
         var conn = new SqlConnection(connectionString);
-        if (!useAzureAd) return conn;
-        conn.AccessToken = AcquireAzureAdToken(ct);
+        
+        // Check if connection string already has Azure AD authentication configured
+        var csBuilder = new SqlConnectionStringBuilder(connectionString);
+        var hasAzureAdAuth = csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDefault ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryIntegrated ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryInteractive ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryManagedIdentity ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryServicePrincipal ||
+                            csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow;
+        
+        // Only set AccessToken if using Azure AD but connection string doesn't already specify Azure AD authentication
+        if (useAzureAd && !hasAzureAdAuth)
+        {
+            conn.AccessToken = AcquireAzureAdToken(ct);
+        }
+        
         return conn;
     }
 

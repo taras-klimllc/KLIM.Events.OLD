@@ -12,20 +12,20 @@ public sealed class OutboxDiagnosticService : BackgroundService
     private readonly OutboxRepository _repository;
     private readonly SqlAuthenticationService _authService;
     private readonly OutboxOptions _config;
-    private readonly ChangeTrackingOptions _fallbackConfig;
+    private readonly DatabaseOptions _databaseConfig;
 
     public OutboxDiagnosticService(
         ILogger<OutboxDiagnosticService> logger,
         OutboxRepository repository,
         SqlAuthenticationService authService,
         IOptions<OutboxOptions> options,
-        IOptions<ChangeTrackingOptions> fallbackOptions)
+        IOptions<DatabaseOptions> databaseOptions)
     {
         _logger = logger;
         _repository = repository;
         _authService = authService;
         _config = options.Value;
-        _fallbackConfig = fallbackOptions.Value;
+        _databaseConfig = databaseOptions.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -52,17 +52,28 @@ public sealed class OutboxDiagnosticService : BackgroundService
     {
         try
         {
-            var (connectionString, useAzureAd) = ResolveConnectionConfig();
+            var (connectionString, useAzureAd) = GetDatabaseConfig();
             if (string.IsNullOrWhiteSpace(connectionString))
             {
-                _logger.LogWarning("?? DIAGNOSTICS: No connection string available");
+                _logger.LogWarning("?? DIAGNOSTICS: No database connection string configured");
                 return;
             }
 
             connectionString = _authService.SanitizeConnectionString(connectionString, useAzureAd);
 
             await using var connection = new SqlConnection(connectionString);
-            if (useAzureAd)
+            
+            // Check if connection string already has Azure AD authentication configured
+            var csBuilder = new SqlConnectionStringBuilder(connectionString);
+            var hasAzureAdAuth = csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDefault ||
+                                csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryIntegrated ||
+                                csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryInteractive ||
+                                csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryManagedIdentity ||
+                                csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryServicePrincipal ||
+                                csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow;
+            
+            // Only set AccessToken if using Azure AD but connection string doesn't already specify Azure AD authentication
+            if (useAzureAd && !hasAzureAdAuth)
             {
                 connection.AccessToken = await _authService.AcquireTokenAsync();
             }
@@ -128,7 +139,7 @@ public sealed class OutboxDiagnosticService : BackgroundService
             }
             else if (pendingCount == 0 && dispatchedCount == 0)
             {
-                _logger.LogWarning("??  NO MESSAGES FOUND - Check if ChangeTrackingPollingService is populating outbox");
+                _logger.LogWarning("?? NO MESSAGES FOUND - Check if ChangeTrackingPollingService is populating outbox");
             }
         }
         catch (Exception ex)
@@ -146,14 +157,8 @@ public sealed class OutboxDiagnosticService : BackgroundService
         return lastDot >= 0 ? primary[(lastDot + 1)..] : primary; // return simple class name
     }
 
-    private (string ConnectionString, bool UseAzureAd) ResolveConnectionConfig()
+    private (string ConnectionString, bool UseAzureAd) GetDatabaseConfig()
     {
-        if (!string.IsNullOrWhiteSpace(_config.ConnectionString))
-            return (_config.ConnectionString, _config.UseAzureAd);
-
-        if (!string.IsNullOrWhiteSpace(_fallbackConfig.ConnectionString))
-            return (_fallbackConfig.ConnectionString, _fallbackConfig.UseAzureAd);
-
-        return (string.Empty, false);
+        return (_databaseConfig.ConnectionString, _databaseConfig.UseAzureAd);
     }
 }

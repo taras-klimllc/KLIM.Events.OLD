@@ -16,7 +16,7 @@ public sealed class OutboxDispatcherService : BackgroundService
     private readonly PollingStrategy _pollingStrategy = new();
     private readonly CleanupScheduler _cleanupScheduler = new();
     private readonly OutboxOptions _config;
-    private readonly ChangeTrackingOptions _fallbackConfig;
+    private readonly DatabaseOptions _databaseConfig;
 
     private int _consecutiveErrors;
 
@@ -26,14 +26,14 @@ public sealed class OutboxDispatcherService : BackgroundService
         MessagePublisher publisher,
         SqlAuthenticationService authService,
         IOptions<OutboxOptions> options,
-        IOptions<ChangeTrackingOptions> fallbackOptions)
+        IOptions<DatabaseOptions> databaseOptions)
     {
         _logger = logger;
         _repository = repository;
         _publisher = publisher;
         _authService = authService;
         _config = options.Value;
-        _fallbackConfig = fallbackOptions.Value;
+        _databaseConfig = databaseOptions.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -44,10 +44,10 @@ public sealed class OutboxDispatcherService : BackgroundService
             return;
         }
 
-        var (connectionString, useAzureAd) = ResolveConnectionConfig();
+        var (connectionString, useAzureAd) = GetDatabaseConfig();
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            _logger.LogWarning("No connection string available; dispatcher disabled");
+            _logger.LogWarning("No database connection string configured; dispatcher disabled");
             return;
         }
 
@@ -59,18 +59,9 @@ public sealed class OutboxDispatcherService : BackgroundService
         await RunDispatchLoopAsync(connectionString, useAzureAd, stoppingToken);
     }
 
-    private (string ConnectionString, bool UseAzureAd) ResolveConnectionConfig()
+    private (string ConnectionString, bool UseAzureAd) GetDatabaseConfig()
     {
-        if (!string.IsNullOrWhiteSpace(_config.ConnectionString))
-            return (_config.ConnectionString, _config.UseAzureAd);
-
-        if (!string.IsNullOrWhiteSpace(_fallbackConfig.ConnectionString))
-        {
-            _logger.LogInformation("Using fallback connection from ChangeTracking config");
-            return (_fallbackConfig.ConnectionString, _fallbackConfig.UseAzureAd);
-        }
-
-        return (string.Empty, false);
+        return (_databaseConfig.ConnectionString, _databaseConfig.UseAzureAd);
     }
 
     private async Task<bool> InitializeAsync(string connectionString, bool useAzureAd, CancellationToken stoppingToken)

@@ -1,0 +1,1146 @@
+# KLIM.Integrations Solution — Comprehensive Second Opinion & Implementation Guide
+**Date:** January 25, 2025
+**Context:** Integration with existing KLIM.Events architecture using Azure AD authentication
+**Author:** AI Architecture Review
+**Purpose:** Ready-to-copy detailed second opinion for another AI implementation
+
+============================================================
+EXECUTIVE SUMMARY
+============================================================
+
+The proposed KLIM.Integrations solution is architecturally sound but requires CRITICAL 
+adjustments to align with the existing KLIM.Events patterns, particularly around Azure AD 
+authentication, messaging topology, and database schema design. 
+
+**MAJOR ISSUE IDENTIFIED**: The proposed solution incorrectly assumes SQL Server authentication
+and suggests modifying the core dbo.Issuers table, both of which violate established patterns
+in the existing KLIM.Events solution.
+
+**RECOMMENDATION**: Keep solutions separate but implement compatibility fixes detailed below.
+
+**RISK LEVEL**: HIGH - Authentication and database schema issues could cause production failures
+
+============================================================
+CRITICAL AUTHENTICATION ISSUES ANALYSIS
+============================================================
+
+**PROBLEM 1: Incorrect Connection String Pattern**
+The proposed docker-compose uses:
+```
+ConnectionStrings__KLIMSql: "Server=sqlserver;Database=KLIM;User Id=sa;Password=Your_password123;TrustServerCertificate=True;"
+```
+
+**ANALYSIS**: This is WRONG for the existing KLIM.Events architecture which uses:
+- Azure AD DefaultAzureCredential authentication
+- Connection string sanitization (removes User ID/Password)
+- SqlAuthenticationService for token acquisition
+- Fallback configuration pattern between OutboxOptions and ChangeTrackingOptions
+
+**EXISTING KLIM.EVENTS PATTERN** (from actual codebase analysis):
+```json
+// appsettings.json pattern (CORRECT)
+{
+  "ChangeTracking": {
+    "ConnectionString": "Server=localhost;Database=KLIM_IM_TK;Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True;Authentication=Active Directory Default",
+    "UseAzureAd": true
+  },
+  "MassTransit": {
+    "Outbox": {
+      "ConnectionString": "", // Falls back to ChangeTracking connection
+      "UseAzureAd": true
+    }
+  }
+}
+```
+
+**DUAL-SOURCE CONFIGURATION PATTERN** (from OutboxDiagnosticService):
+```csharp
+private (string ConnectionString, bool UseAzureAd) ResolveConnectionConfig()
+{
+    // Primary source: OutboxOptions
+    if (!string.IsNullOrWhiteSpace(_config.ConnectionString))
+        return (_config.ConnectionString, _config.UseAzureAd);
+
+    // Fallback: ChangeTrackingOptions
+    if (!string.IsNullOrWhiteSpace(_fallbackConfig.ConnectionString))
+        return (_fallbackConfig.ConnectionString, _fallbackConfig.UseAzureAd);
+
+    return (string.Empty, false);
+}
+```
+
+**REQUIRED FIX**: Update KLIM.Integrations to use the same Azure AD pattern:
+
+```csharp
+// src/KLIM.Integrations.Affinity/Infrastructure/SqlAuthenticationService.cs - NEW FILE
+using Azure.Identity;
+using Azure.Core;
+using Microsoft.Data.SqlClient;
+
+namespace KLIM.Integrations.Affinity.Infrastructure;
+
+public sealed class SqlAuthenticationService
+{
+    private const string AZURE_SQL_SCOPE = "https://database.windows.net/.default";
+
+    public async Task<string> AcquireTokenAsync(CancellationToken cancellationToken = default)
+    {
+        var credential = new DefaultAzureCredential();
+        var token = await credential.GetTokenAsync(
+            new TokenRequestContext(new[] { AZURE_SQL_SCOPE }), 
+            cancellationToken);
+        return token.Token;
+    }
+
+    public string SanitizeConnectionString(string connectionString, bool useAzureAd)
+    {
+        if (!useAzureAd) return connectionString;
+        var builder = new SqlConnectionStringBuilder(connectionString);
+        builder.Remove("User ID");
+        builder.Remove("Password");
+        return builder.ConnectionString;
+    }
+}
+```
+
+============================================================
+DATABASE SCHEMA CRITICAL FIXES
+============================================================
+
+**PROBLEM 2: Incorrect Core Table Modification**
+The proposed solution suggests modifying dbo.Issuers:
+```sql
+-- WRONG - Cannot modify existing core table
+ALTER TABLE dbo.Issuers ADD 
+    AffinityExternalId NVARCHAR(128) NULL,
+    LastAffinitySync DATETIME2(3) NULL;
+```
+
+**ANALYSIS**: This violates separation of concerns and creates tight coupling between
+core business entities and integration systems. Future integrations would require
+further table modifications, creating a maintenance nightmare.
+
+**CORRECT APPROACH**: Create integration mapping tables that reference core entities:
+
+```sql
+-- deploy/sql/0001_integration_schema.sql - CORRECTED
+-- Create integration schema for all external integrations
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'integration')
+    EXEC('CREATE SCHEMA integration');
+GO
+
+-- Create aff schema for raw webhook storage (unchanged)
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'aff')
+    EXEC('CREATE SCHEMA aff');
+GO
+
+-- Raw webhook events table (unchanged from proposal)
+IF OBJECT_ID('aff.WebhookEvents', 'U') IS NULL
+BEGIN
+    CREATE TABLE aff.WebhookEvents
+    (
+        Id           BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_WebhookEvents PRIMARY KEY,
+        ReceivedAt   DATETIME2(3) NOT NULL CONSTRAINT DF_WebhookEvents_ReceivedAt DEFAULT SYSUTCDATETIME(),
+        EventType    NVARCHAR(100) NOT NULL,
+        DeliveryKey  NVARCHAR(128) NULL,
+        [Hash]       VARBINARY(32) NOT NULL, -- SHA-256
+        Payload      NVARCHAR(MAX) NOT NULL
+    );
+END
+GO
+
+-- Integration mapping for Affinity organizations (NEW APPROACH)
+IF OBJECT_ID('integration.AffinityOrganizations', 'U') IS NULL
+BEGIN
+    CREATE TABLE integration.AffinityOrganizations
+    (
+        AffinityOrganizationId NVARCHAR(128) NOT NULL PRIMARY KEY,
+        KLIMIssuerID INT NOT NULL, -- FK to existing dbo.Issuers.IssuerID
+        ExternalId NVARCHAR(128) NULL,
+        Name NVARCHAR(256) NOT NULL,
+        Domain NVARCHAR(256) NULL,
+        CreatedAtUtc DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+        UpdatedAtUtc DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+        LastSyncAtUtc DATETIME2(3) NULL,
+        SyncStatus NVARCHAR(50) NOT NULL DEFAULT 'Active',
+        MergedIntoAffinityOrganizationId NVARCHAR(128) NULL
+    );
+END
+GO
+
+-- Foreign key to existing Issuers table (DO NOT MODIFY dbo.Issuers)
+IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'FK_AffinityOrganizations_Issuers')
+BEGIN
+    ALTER TABLE integration.AffinityOrganizations 
+    ADD CONSTRAINT FK_AffinityOrganizations_Issuers 
+    FOREIGN KEY (KLIMIssuerID) REFERENCES dbo.Issuers(IssuerID);
+END
+GO
+
+-- Performance indexes
+CREATE INDEX IX_AffinityOrganizations_KLIMIssuerID ON integration.AffinityOrganizations(KLIMIssuerID);
+CREATE INDEX IX_AffinityOrganizations_ExternalId ON integration.AffinityOrganizations(ExternalId);
+CREATE INDEX IX_AffinityOrganizations_UpdatedAt ON integration.AffinityOrganizations(UpdatedAtUtc DESC);
+CREATE INDEX IX_AffinityOrganizations_SyncStatus ON integration.AffinityOrganizations(SyncStatus);
+GO
+```
+
+============================================================
+MESSAGING TOPOLOGY ALIGNMENT
+============================================================
+
+**PROBLEM 3: Exchange Naming Conflicts**
+Current proposed solution uses different exchange patterns:
+- KLIM.Events: "klim.change.events" (topic) with MassTransit
+- KLIM.Integrations: "klim.affinity.events" (topic) with RabbitMQ.Client
+
+**ANALYSIS**: This creates operational complexity, inconsistent monitoring patterns, and
+potential routing confusion.
+
+**RECOMMENDED FIX**: Align exchange naming while keeping independence:
+
+```json
+// src/KLIM.Integrations.Affinity/appsettings.json - UPDATED
+{
+  "Webhooks": {
+    "Secret": "REPLACE_ME"
+  },
+  "ConnectionStrings": {
+    "KLIMSql": "Server=localhost;Database=KLIM;Encrypt=True;TrustServerCertificate=True;Authentication=Active Directory Default"
+  },
+  "Integration": {
+    "ConnectionString": "", // Falls back to ConnectionStrings:KLIMSql
+    "UseAzureAd": true,
+    "DiagnosticsIntervalMinutes": 5
+  },
+  "RabbitMQ": {
+    "Host": "rabbitmq",
+    "Username": "guest",
+    "Password": "guest", 
+    "ExchangeName": "klim.events.integration", // ALIGNED naming
+    "RoutingKeyPrefix": "klim.integration.affinity"
+  }
+}
+```
+
+**Updated Routing Key Generation**:
+```csharp
+// src/KLIM.Integrations.Affinity/Program.cs - UPDATED
+static string BuildRoutingKey(string eventTypeHeader, string body)
+{
+    var evt = (eventTypeHeader ?? string.Empty).Trim();
+    if (string.IsNullOrEmpty(evt))
+    {
+        try
+        {
+            var node = JsonNode.Parse(body);
+            evt = node?["type"]?.GetValue<string>() ?? "unknown";
+        }
+        catch { evt = "unknown"; }
+    }
+    
+    // UPDATED routing pattern: klim.integration.affinity.{event}.v1
+    return $"klim.integration.affinity.{evt.Replace(' ', '.').ToLowerInvariant()}.v1";
+}
+```
+
+**Consumer Binding Update**:
+```json
+// src/KLIM.Integrations.Affinity.SqlWriter/appsettings.json - UPDATED
+{
+  "Consumer": {
+    "QueueName": "klim.integration.affinity.sqlwriter",
+    "BindingKey": "klim.integration.affinity.#",  // Updated pattern
+    "Prefetch": 32
+  }
+}
+```
+
+============================================================
+ENHANCED SQLWRITER WITH PROPER INTEGRATION LOGIC
+============================================================
+
+**PROBLEM 4: Incorrect Database Logic**
+The proposed SqlUpserter directly modifies dbo.Issuers, violating the separation pattern.
+
+**CORRECTED IMPLEMENTATION**:
+
+```csharp
+// src/KLIM.Integrations.Affinity.SqlWriter/Upsert/SqlUpserter.cs - REWRITTEN
+using System.Text.Json;
+using Dapper;
+using Microsoft.Data.SqlClient;
+
+namespace KLIM.Integrations.Affinity.SqlWriter.Upsert;
+
+public static class SqlUpserter
+{
+    public static async Task<bool> HandleAsync(SqlConnection conn, string routingKey, string json, CancellationToken ct)
+    {
+        // Updated routing pattern matching
+        return routingKey switch
+        {
+            "klim.integration.affinity.organization.created.v1" => await UpsertOrganizationFromCreatedAsync(conn, json, ct),
+            "klim.integration.affinity.organization.merged.v1" => await HandleOrganizationMergeAsync(conn, json, ct),
+            _ when routingKey.StartsWith("klim.integration.affinity.") => await HandleGenericAffinityEventAsync(conn, routingKey, json, ct),
+            _ => false
+        };
+    }
+
+    private static async Task<bool> UpsertOrganizationFromCreatedAsync(SqlConnection conn, string json, CancellationToken ct)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        string affinityOrgId = root.GetPropertyOrDefault("organizationId")
+                              ?? root.GetPropertyOrDefault("id")
+                              ?? throw new ArgumentException("Missing organization ID in payload");
+
+        string name = root.GetPropertyOrDefault("name") ?? "Unknown Organization";
+        string? externalId = root.GetPropertyOrDefault("externalId");
+        string? domain = root.GetPropertyOrDefault("domain");
+
+        // Step 1: Find or create in dbo.Issuers (use existing IssuerID if found by matching criteria)
+        var existingIssuerId = await FindExistingIssuerAsync(conn, name, domain, ct);
+        int klimIssuerId;
+
+        if (existingIssuerId.HasValue)
+        {
+            klimIssuerId = existingIssuerId.Value;
+            // Optionally update existing issuer name if needed (careful with business rules)
+            await UpdateIssuerIfNeededAsync(conn, klimIssuerId, name, ct);
+        }
+        else
+        {
+            // Create new issuer in dbo.Issuers (following existing business rules)
+            klimIssuerId = await CreateNewIssuerAsync(conn, name, domain, ct);
+        }
+
+        // Step 2: Upsert in integration mapping table (this is the key difference)
+        const string upsertMappingSql = @"
+        MERGE integration.AffinityOrganizations AS T
+        USING (VALUES (@AffinityOrgId, @KLIMIssuerID, @ExternalId, @Name, @Domain, SYSUTCDATETIME())) 
+               AS S(AffinityOrganizationId, KLIMIssuerID, ExternalId, Name, Domain, UpdatedAtUtc)
+        ON T.AffinityOrganizationId = S.AffinityOrganizationId
+        WHEN MATCHED THEN UPDATE SET
+            T.ExternalId = COALESCE(S.ExternalId, T.ExternalId),
+            T.Name = COALESCE(S.Name, T.Name),
+            T.Domain = COALESCE(S.Domain, T.Domain),
+            T.UpdatedAtUtc = S.UpdatedAtUtc,
+            T.LastSyncAtUtc = S.UpdatedAtUtc,
+            T.SyncStatus = 'Active'
+        WHEN NOT MATCHED THEN INSERT (
+            AffinityOrganizationId, KLIMIssuerID, ExternalId, Name, Domain, 
+            CreatedAtUtc, UpdatedAtUtc, LastSyncAtUtc, SyncStatus
+        ) VALUES (
+            S.AffinityOrganizationId, S.KLIMIssuerID, S.ExternalId, S.Name, S.Domain,
+            S.UpdatedAtUtc, S.UpdatedAtUtc, S.UpdatedAtUtc, 'Active'
+        );";
+
+        await conn.ExecuteAsync(new CommandDefinition(upsertMappingSql, new
+        {
+            AffinityOrgId = affinityOrgId,
+            KLIMIssuerID = klimIssuerId,
+            ExternalId = externalId,
+            Name = name,
+            Domain = domain
+        }, cancellationToken: ct));
+
+        return true;
+    }
+
+    private static async Task<bool> HandleOrganizationMergeAsync(SqlConnection conn, string json, CancellationToken ct)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var sourceId = root.GetPropertyOrDefault("sourceOrganizationId");
+        var targetId = root.GetPropertyOrDefault("targetOrganizationId");
+
+        if (string.IsNullOrEmpty(sourceId) || string.IsNullOrEmpty(targetId))
+            return false;
+
+        // Mark the source organization as merged in the integration table ONLY
+        const string mergeSql = @"
+        UPDATE integration.AffinityOrganizations 
+        SET MergedIntoAffinityOrganizationId = @TargetId,
+            SyncStatus = 'Merged',
+            UpdatedAtUtc = SYSUTCDATETIME(),
+            LastSyncAtUtc = SYSUTCDATETIME()
+        WHERE AffinityOrganizationId = @SourceId;";
+
+        var rowsAffected = await conn.ExecuteAsync(new CommandDefinition(mergeSql, new 
+        { 
+            SourceId = sourceId, 
+            TargetId = targetId 
+        }, cancellationToken: ct));
+
+        return rowsAffected > 0;
+    }
+
+    private static async Task<bool> HandleGenericAffinityEventAsync(SqlConnection conn, string routingKey, string json, CancellationToken ct)
+    {
+        // Log unhandled event types for future implementation
+        // This method exists for extensibility
+        return false;
+    }
+
+    // Helper methods for issuer management
+    private static async Task<int?> FindExistingIssuerAsync(SqlConnection conn, string name, string? domain, CancellationToken ct)
+    {
+        const string sql = @"
+        SELECT TOP 1 IssuerID 
+        FROM dbo.Issuers 
+        WHERE (Name = @Name OR (@Domain IS NOT NULL AND Domain = @Domain))
+        ORDER BY 
+            CASE WHEN Name = @Name AND Domain = @Domain THEN 1 
+                 WHEN Name = @Name THEN 2 
+                 WHEN Domain = @Domain THEN 3 
+                 ELSE 4 END";
+
+        return await conn.QuerySingleOrDefaultAsync<int?>(new CommandDefinition(sql, new
+        {
+            Name = name,
+            Domain = domain
+        }, cancellationToken: ct));
+    }
+
+    private static async Task<int> CreateNewIssuerAsync(SqlConnection conn, string name, string? domain, CancellationToken ct)
+    {
+        // IMPORTANT: This assumes dbo.Issuers has specific columns - adjust based on actual schema
+        const string sql = @"
+        INSERT INTO dbo.Issuers (Name, Domain, CreatedDate, UpdatedDate)
+        OUTPUT INSERTED.IssuerID
+        VALUES (@Name, @Domain, GETUTCDATE(), GETUTCDATE());";
+
+        return await conn.QuerySingleAsync<int>(new CommandDefinition(sql, new
+        {
+            Name = name,
+            Domain = domain
+        }, cancellationToken: ct));
+    }
+
+    private static async Task UpdateIssuerIfNeededAsync(SqlConnection conn, int issuerId, string name, CancellationToken ct)
+    {
+        // CAREFUL: Only update if business rules allow it
+        const string sql = @"
+        UPDATE dbo.Issuers 
+        SET Name = @Name, UpdatedDate = GETUTCDATE()
+        WHERE IssuerID = @IssuerID AND Name != @Name;";
+
+        await conn.ExecuteAsync(new CommandDefinition(sql, new
+        {
+            IssuerID = issuerId,
+            Name = name
+        }, cancellationToken: ct));
+    }
+
+    // Extension method for safe property access
+    private static string? GetPropertyOrDefault(this JsonElement el, string name)
+    {
+        if (el.TryGetProperty(name, out var v))
+        {
+            return v.ValueKind switch
+            {
+                JsonValueKind.String => v.GetString(),
+                JsonValueKind.Number => v.ToString(),
+                JsonValueKind.True => "true",
+                JsonValueKind.False => "false",
+                _ => null
+            };
+        }
+        return null;
+    }
+}
+```
+
+============================================================
+CONFIGURATION PATTERN ALIGNMENT
+============================================================
+
+**PROBLEM 5: Configuration Inconsistency**
+The proposed solution doesn't follow the existing dual-connection-source pattern
+used in KLIM.Events.
+
+**REQUIRED CONFIGURATION CLASSES**:
+
+```csharp
+// src/KLIM.Integrations.Affinity.SqlWriter/Configuration/IntegrationOptions.cs - NEW
+namespace KLIM.Integrations.Affinity.SqlWriter.Configuration;
+
+public sealed class IntegrationOptions
+{
+    public string ConnectionString { get; set; } = string.Empty;
+    public bool UseAzureAd { get; set; } = false;
+    public int BatchSize { get; set; } = 100;
+    public int DiagnosticsIntervalMinutes { get; set; } = 5;
+    public int CommandTimeoutSeconds { get; set; } = 30;
+}
+
+public sealed class WebhookOptions
+{
+    public string Secret { get; set; } = string.Empty;
+    public string ConnectionString { get; set; } = string.Empty; // Fallback
+    public bool UseAzureAd { get; set; } = false;
+}
+
+public sealed class RabbitMQOptions
+{
+    public string Host { get; set; } = "rabbitmq";
+    public string Username { get; set; } = "guest";
+    public string Password { get; set; } = "guest";
+    public string ExchangeName { get; set; } = "klim.events.integration";
+    public string RoutingKeyPrefix { get; set; } = "klim.integration.affinity";
+}
+
+public sealed class ConsumerOptions
+{
+    public string QueueName { get; set; } = "klim.integration.affinity.sqlwriter";
+    public string BindingKey { get; set; } = "klim.integration.affinity.#";
+    public int Prefetch { get; set; } = 32;
+}
+```
+
+============================================================
+ENHANCED DIAGNOSTIC SERVICE
+============================================================
+
+**IMPROVEMENT**: Add diagnostics service that follows KLIM.Events patterns:
+
+```csharp
+// src/KLIM.Integrations.Affinity.SqlWriter/Infrastructure/IntegrationDiagnosticService.cs - NEW
+using Microsoft.Extensions.Options;
+using Microsoft.Data.SqlClient;
+using KLIM.Integrations.Affinity.SqlWriter.Configuration;
+
+namespace KLIM.Integrations.Affinity.SqlWriter.Infrastructure;
+
+/// <summary>
+/// Diagnostic service for integration status monitoring (follows KLIM.Events pattern)
+/// </summary>
+public sealed class IntegrationDiagnosticService : BackgroundService
+{
+    private readonly ILogger<IntegrationDiagnosticService> _logger;
+    private readonly SqlAuthenticationService _authService;
+    private readonly IntegrationOptions _config;
+    private readonly WebhookOptions _fallbackConfig;
+
+    public IntegrationDiagnosticService(
+        ILogger<IntegrationDiagnosticService> logger,
+        SqlAuthenticationService authService,
+        IOptions<IntegrationOptions> config,
+        IOptions<WebhookOptions> fallbackConfig)
+    {
+        _logger = logger;
+        _authService = authService;
+        _config = config.Value;
+        _fallbackConfig = fallbackConfig.Value;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // Run diagnostics once on startup, then every configured interval
+        await RunDiagnosticsAsync();
+        
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(_config.DiagnosticsIntervalMinutes));
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await timer.WaitForNextTickAsync(stoppingToken);
+                await RunDiagnosticsAsync();
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+    }
+
+    private async Task RunDiagnosticsAsync()
+    {
+        try
+        {
+            var (connectionString, useAzureAd) = ResolveConnectionConfig();
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                _logger.LogWarning("?? INTEGRATION DIAGNOSTICS: No connection string available");
+                return;
+            }
+
+            connectionString = _authService.SanitizeConnectionString(connectionString, useAzureAd);
+
+            await using var connection = new SqlConnection(connectionString);
+            if (useAzureAd)
+            {
+                connection.AccessToken = await _authService.AcquireTokenAsync();
+            }
+            await connection.OpenAsync();
+
+            // Check webhook events
+            const string webhookSql = @"
+            SELECT 
+                COUNT(*) as TotalEvents,
+                COUNT(DISTINCT EventType) as UniqueEventTypes,
+                MAX(ReceivedAt) as LastReceived
+            FROM aff.WebhookEvents WITH (NOLOCK)";
+
+            var webhookStats = await connection.QuerySingleOrDefaultAsync(webhookSql);
+
+            // Check integration mappings
+            const string mappingSql = @"
+            SELECT 
+                COUNT(*) as TotalMappings,
+                COUNT(CASE WHEN SyncStatus = 'Active' THEN 1 END) as ActiveMappings,
+                COUNT(CASE WHEN SyncStatus = 'Merged' THEN 1 END) as MergedMappings,
+                MAX(UpdatedAtUtc) as LastUpdate
+            FROM integration.AffinityOrganizations WITH (NOLOCK)";
+
+            var mappingStats = await connection.QuerySingleOrDefaultAsync(mappingSql);
+
+            // Check core issuer references
+            const string issuerSql = @"
+            SELECT COUNT(DISTINCT KLIMIssuerID) as UniqueIssuersLinked
+            FROM integration.AffinityOrganizations WITH (NOLOCK)
+            WHERE KLIMIssuerID IS NOT NULL";
+
+            var issuerStats = await connection.QuerySingleOrDefaultAsync<int?>(issuerSql) ?? 0;
+
+            _logger.LogInformation(
+                "?? INTEGRATION STATUS: Webhooks={TotalEvents} types={UniqueTypes} | Mappings={TotalMappings} (Active={ActiveMappings}, Merged={MergedMappings}) | LinkedIssuers={LinkedIssuers}",
+                webhookStats?.TotalEvents ?? 0, 
+                webhookStats?.UniqueEventTypes ?? 0,
+                mappingStats?.TotalMappings ?? 0, 
+                mappingStats?.ActiveMappings ?? 0, 
+                mappingStats?.MergedMappings ?? 0,
+                issuerStats);
+
+            // Check for recent activity
+            if (webhookStats?.LastReceived != null)
+            {
+                var lastReceived = (DateTime)webhookStats.LastReceived;
+                var timeSinceLastWebhook = DateTime.UtcNow - lastReceived;
+                
+                if (timeSinceLastWebhook > TimeSpan.FromHours(1))
+                {
+                    _logger.LogWarning("??  No webhook activity for {Hours} hours (last: {LastReceived:yyyy-MM-dd HH:mm:ss} UTC)", 
+                        (int)timeSinceLastWebhook.TotalHours, lastReceived);
+                }
+            }
+
+            // Database health check
+            _logger.LogInformation("?? Database connection healthy (AzureAD: {UseAzureAd})", useAzureAd);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "?? INTEGRATION DIAGNOSTICS FAILED");
+        }
+    }
+
+    private (string ConnectionString, bool UseAzureAd) ResolveConnectionConfig()
+    {
+        // Follow KLIM.Events pattern: primary config, then fallback
+        if (!string.IsNullOrWhiteSpace(_config.ConnectionString))
+            return (_config.ConnectionString, _config.UseAzureAd);
+
+        if (!string.IsNullOrWhiteSpace(_fallbackConfig.ConnectionString))
+        {
+            _logger.LogDebug("Using fallback connection from Webhooks config");
+            return (_fallbackConfig.ConnectionString, _fallbackConfig.UseAzureAd);
+        }
+
+        return (string.Empty, false);
+    }
+}
+```
+
+============================================================
+CORRECTED DOCKER COMPOSE
+============================================================
+
+**PROBLEM 6: Incorrect Docker Environment Variables**
+The proposed docker-compose uses SQL authentication instead of Azure AD.
+
+**CORRECTED VERSION**:
+
+```yaml
+# deploy/docker-compose.integrations.yml - CORRECTED
+version: "3.9"
+
+services:
+  affinity-integration:
+    build:
+      context: ../
+      dockerfile: src/KLIM.Integrations.Affinity/Dockerfile
+    image: klim/affinity-integration:dev
+    environment:
+      ASPNETCORE_URLS: http://+:8088
+      Webhooks__Secret: "${AFFINITY_WEBHOOK_SECRET:-REPLACE_ME}"
+      # CORRECTED: Use Azure AD pattern like KLIM.Events
+      ConnectionStrings__KLIMSql: "${KLIM_SQL_CONNECTION:-Server=localhost;Database=KLIM;Encrypt=True;TrustServerCertificate=True;Authentication=Active Directory Default}"
+      Integration__UseAzureAd: "${USE_AZURE_AD:-true}"
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: guest
+      RabbitMQ__Password: guest
+      RabbitMQ__ExchangeName: klim.events.integration
+      RabbitMQ__RoutingKeyPrefix: klim.integration.affinity
+    ports:
+      - "8088:8088"
+    depends_on:
+      - rabbitmq
+      # NOTE: Do NOT depend on sqlserver for Azure AD scenarios
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+  affinity-sql-writer:
+    build:
+      context: ../
+      dockerfile: src/KLIM.Integrations.Affinity.SqlWriter/Dockerfile
+    image: klim/affinity-sql-writer:dev
+    environment:
+      # CORRECTED: Same Azure AD pattern
+      Integration__ConnectionString: "${KLIM_SQL_CONNECTION:-Server=localhost;Database=KLIM;Encrypt=True;TrustServerCertificate=True;Authentication=Active Directory Default}"
+      Integration__UseAzureAd: "${USE_AZURE_AD:-true}"
+      Integration__DiagnosticsIntervalMinutes: "5"
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: guest
+      RabbitMQ__Password: guest
+      RabbitMQ__ExchangeName: klim.events.integration
+      Consumer__QueueName: klim.integration.affinity.sqlwriter
+      Consumer__BindingKey: "klim.integration.affinity.#"
+      Consumer__Prefetch: "32"
+    depends_on:
+      - rabbitmq
+      - affinity-integration
+    restart: unless-stopped
+
+# NOTE: This overlay expects base compose to define 'rabbitmq'.
+# For Azure AD scenarios, SQL Server runs on Azure, not in containers.
+```
+
+**ENVIRONMENT VARIABLE SETUP**:
+```bash
+# .env file for development
+AFFINITY_WEBHOOK_SECRET=dev-secret-12345
+KLIM_SQL_CONNECTION=Server=localhost;Database=KLIM;Encrypt=True;TrustServerCertificate=True;Authentication=Active Directory Default
+USE_AZURE_AD=true
+
+# For production Azure deployment
+KLIM_SQL_CONNECTION=Server=your-azure-sql.database.windows.net;Database=KLIM;Encrypt=True
+USE_AZURE_AD=true
+```
+
+============================================================
+UPDATED PROGRAM.CS FOR KLIM.INTEGRATIONS
+============================================================
+
+**REQUIRED CHANGES**: Update service registration to follow KLIM.Events patterns:
+
+```csharp
+// src/KLIM.Integrations.Affinity.SqlWriter/Program.cs - UPDATED
+using KLIM.Integrations.Affinity.SqlWriter;
+using KLIM.Integrations.Affinity.SqlWriter.Infrastructure;
+using KLIM.Integrations.Affinity.SqlWriter.Configuration;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+// Configuration - Follow KLIM.Events pattern with fallback
+builder.Services.Configure<IntegrationOptions>(builder.Configuration.GetSection("Integration"));
+builder.Services.Configure<WebhookOptions>(builder.Configuration.GetSection("Webhooks"));
+builder.Services.Configure<RabbitMQOptions>(builder.Configuration.GetSection("RabbitMQ"));
+builder.Services.Configure<ConsumerOptions>(builder.Configuration.GetSection("Consumer"));
+
+// Services - Follow KLIM.Events pattern
+builder.Services.AddSingleton<SqlAuthenticationService>();
+
+// Background services
+builder.Services.AddHostedService<Worker>();
+builder.Services.AddHostedService<IntegrationDiagnosticService>(); // NEW - follows KLIM.Events pattern
+
+// Logging - Follow KLIM.Events pattern with structured logging
+builder.Logging.AddSimpleConsole(o => { 
+    o.TimestampFormat = "HH:mm:ss "; 
+    o.SingleLine = true;
+});
+
+// Add filtering to reduce RabbitMQ noise (follows KLIM.Events approach)
+builder.Logging.AddFilter("RabbitMQ.Client", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.Extensions.Hosting", LogLevel.Information);
+
+var app = builder.Build();
+
+// Add startup logging
+var logger = app.Services.GetRequiredService<ILogger<Program>>();
+logger.LogInformation("KLIM.Integrations.Affinity.SqlWriter starting up...");
+
+await app.RunAsync();
+```
+
+```csharp
+// src/KLIM.Integrations.Affinity/Program.cs - UPDATED
+using KLIM.Integrations.Affinity.Infrastructure;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Configuration following KLIM.Events pattern
+builder.Services.Configure<WebhookOptions>(builder.Configuration.GetSection("Webhooks"));
+builder.Services.Configure<IntegrationOptions>(builder.Configuration.GetSection("Integration"));
+builder.Services.Configure<RabbitMQOptions>(builder.Configuration.GetSection("RabbitMQ"));
+
+// Services
+builder.Services.AddHealthChecks();
+builder.Services.AddSingleton<SqlAuthenticationService>(); // NEW - Azure AD support
+builder.Services.AddSingleton<IRabbitPublisher, RabbitPublisher>();
+
+var app = builder.Build();
+
+// Health endpoint (follows KLIM.Events pattern)
+app.MapGet("/health", () => Results.Ok(new { 
+    status = "OK", 
+    timestamp = DateTime.UtcNow,
+    service = "KLIM.Integrations.Affinity" 
+}));
+
+// Webhook endpoint with Azure AD support
+app.MapPost("/webhooks/affinity/{secret}", async (
+    HttpRequest request, 
+    string secret, 
+    IConfiguration config, 
+    SqlAuthenticationService sqlAuth,
+    IRabbitPublisher publisher, 
+    ILoggerFactory lf, 
+    CancellationToken ct) =>
+{
+    var logger = lf.CreateLogger("AffinityWebhook");
+    var webhookOptions = config.GetSection("Webhooks").Get<WebhookOptions>()!;
+    
+    if (string.IsNullOrWhiteSpace(webhookOptions.Secret) || !string.Equals(secret, webhookOptions.Secret, StringComparison.Ordinal))
+    {
+        logger.LogWarning("Webhook secret mismatch for delivery {DeliveryKey}", 
+            request.Headers["X-Affinity-Delivery"].FirstOrDefault() ?? "unknown");
+        return Results.Unauthorized();
+    }
+
+    var eventType = request.Headers["X-Affinity-Event"].FirstOrDefault() ?? "unknown";
+    var deliveryKey = request.Headers["X-Affinity-Delivery"].FirstOrDefault() ?? Guid.NewGuid().ToString("N");
+
+    using var reader = new StreamReader(request.Body);
+    var body = await reader.ReadToEndAsync(ct);
+    if (string.IsNullOrWhiteSpace(body))
+        return Results.BadRequest("Empty payload");
+
+    // Persist raw webhook with Azure AD support
+    var integrationOptions = config.GetSection("Integration").Get<IntegrationOptions>()!;
+    var (connectionString, useAzureAd) = ResolveConnectionConfig(integrationOptions, webhookOptions);
+    
+    if (!string.IsNullOrWhiteSpace(connectionString))
+    {
+        connectionString = sqlAuth.SanitizeConnectionString(connectionString, useAzureAd);
+        
+        await using var conn = new SqlConnection(connectionString);
+        if (useAzureAd)
+        {
+            conn.AccessToken = await sqlAuth.AcquireTokenAsync(ct);
+        }
+        await conn.OpenAsync(ct);
+        
+        var hash = SqlHelpers.ComputePayloadHash(eventType, body);
+        await SqlHelpers.InsertWebhookEventIfNewAsync(conn, eventType, deliveryKey, hash, body, ct);
+    }
+
+    // Publish to aligned topic exchange
+    var routingKey = BuildRoutingKey(eventType, body);
+    var headers = new Dictionary<string, object>
+    {
+        ["delivery-key"] = deliveryKey,
+        ["source"] = "affinity",
+        ["correlation-id"] = Guid.NewGuid().ToString(),
+        ["received-at"] = DateTimeOffset.UtcNow.ToString("O")
+    };
+
+    await publisher.PublishAsync(routingKey, System.Text.Encoding.UTF8.GetBytes(body), headers);
+
+    logger.LogInformation("Processed Affinity webhook: {EventType} -> {RoutingKey} (delivery: {DeliveryKey})",
+        eventType, routingKey, deliveryKey);
+
+    return Results.Accepted();
+});
+
+app.Run();
+
+// Helper method following KLIM.Events pattern
+static (string ConnectionString, bool UseAzureAd) ResolveConnectionConfig(IntegrationOptions integration, WebhookOptions webhook)
+{
+    if (!string.IsNullOrWhiteSpace(integration.ConnectionString))
+        return (integration.ConnectionString, integration.UseAzureAd);
+
+    if (!string.IsNullOrWhiteSpace(webhook.ConnectionString))
+        return (webhook.ConnectionString, webhook.UseAzureAd);
+
+    return (string.Empty, false);
+}
+
+// Updated routing key generation
+static string BuildRoutingKey(string eventTypeHeader, string body)
+{
+    var evt = (eventTypeHeader ?? string.Empty).Trim();
+    if (string.IsNullOrEmpty(evt))
+    {
+        try
+        {
+            var node = JsonNode.Parse(body);
+            evt = node?["type"]?.GetValue<string>() ?? "unknown";
+        }
+        catch { evt = "unknown"; }
+    }
+    
+    return $"klim.integration.affinity.{evt.Replace(' ', '.').ToLowerInvariant()}.v1";
+}
+```
+
+============================================================
+SOLUTION ARCHITECTURE FINAL RECOMMENDATION
+============================================================
+
+**DECISION: Keep Solutions Separate with Compatibility Fixes**
+
+**Reasoning:**
+1. **Domain Separation**: Events (internal change tracking) vs Integrations (external webhooks)
+2. **Team Ownership**: Different teams can own different solutions
+3. **Deployment Independence**: Independent release cycles and scaling
+4. **Technology Evolution**: Each can evolve patterns independently
+5. **Risk Mitigation**: Changes to one don't affect the other
+
+**Final Structure:**
+```
+KLIM.Events.sln (existing - no changes needed)
+??? src/KLIM.Events.Service/ 
+??? Internal change tracking with outbox pattern
+??? MassTransit messaging to "klim.change.events"
+??? Azure AD authentication with dual-source config
+??? Rich 2KB+ entity change events
+
+KLIM.Integrations.sln (new - with all fixes applied)
+??? src/KLIM.Integrations.Contracts/
+??? src/KLIM.Integrations.Affinity/ (Web API with Azure AD)
+??? src/KLIM.Integrations.Affinity.SqlWriter/ (Worker with Azure AD)
+??? External webhook processing with integration mapping
+??? RabbitMQ.Client messaging to "klim.events.integration" 
+??? Azure AD authentication with same patterns as KLIM.Events
+??? integration.AffinityOrganizations mapping (NO core table modifications)
+```
+
+============================================================
+CRITICAL IMPLEMENTATION CHECKLIST
+============================================================
+
+**BEFORE IMPLEMENTING KLIM.INTEGRATIONS - MANDATORY FIXES:**
+
+? **Authentication (CRITICAL)**:
+- [ ] Create SqlAuthenticationService following KLIM.Events exact pattern
+- [ ] Use DefaultAzureCredential with same options as KLIM.Events
+- [ ] Implement dual-source configuration fallback (Integration -> Webhooks)
+- [ ] Remove ALL SQL Server User ID/Password from docker-compose
+- [ ] Test Azure AD token acquisition and connection string sanitization
+
+? **Database Schema (CRITICAL)**:
+- [ ] Create integration.AffinityOrganizations mapping table
+- [ ] DO NOT modify dbo.Issuers table under any circumstances
+- [ ] Add foreign key constraints to existing tables
+- [ ] Create proper indexes for query performance
+- [ ] Test with actual dbo.Issuers schema from KLIM database
+
+? **Configuration (CRITICAL)**:
+- [ ] Implement IntegrationOptions and WebhookOptions classes
+- [ ] Add dual-source configuration resolution method
+- [ ] Use environment variables for all secrets and connection strings
+- [ ] Validate Azure AD settings in both services
+- [ ] Test configuration fallback logic
+
+? **Messaging Topology (HIGH PRIORITY)**:
+- [ ] Change exchange name to "klim.events.integration"
+- [ ] Update routing keys to "klim.integration.affinity.*.v1" pattern
+- [ ] Update consumer binding to "klim.integration.affinity.#"
+- [ ] Test message flow between webhook API and SQL writer
+- [ ] Ensure no conflicts with existing KLIM.Events exchange
+
+? **Service Implementation (HIGH PRIORITY)**:
+- [ ] Rewrite SqlUpserter to use integration mapping tables
+- [ ] Add IntegrationDiagnosticService following KLIM.Events pattern
+- [ ] Update Program.cs files with proper service registration
+- [ ] Add comprehensive logging with structured properties
+- [ ] Test end-to-end webhook processing
+
+? **Docker & Deployment (MEDIUM PRIORITY)**:
+- [ ] Update docker-compose with Azure AD environment variables
+- [ ] Remove SQL Server container dependency for production
+- [ ] Add proper health checks and restart policies
+- [ ] Test container startup and Azure AD authentication
+- [ ] Validate environment variable resolution
+
+============================================================
+VALIDATION PROCEDURES
+============================================================
+
+**Test Azure AD Authentication**:
+```bash
+# 1. Test local development with Azure AD
+export KLIM_SQL_CONNECTION="Server=localhost;Database=KLIM;Encrypt=True;TrustServerCertificate=True;Authentication=Active Directory Default"
+export USE_AZURE_AD=true
+dotnet run --project src/KLIM.Integrations.Affinity.SqlWriter
+
+# 2. Check logs for successful authentication
+grep "AccessToken acquired" logs/*.log
+grep "Database connection healthy" logs/*.log
+grep "AzureAD: true" logs/*.log
+```
+
+**Test Integration Mapping**:
+```sql
+-- 1. Verify integration tables exist
+SELECT TABLE_SCHEMA, TABLE_NAME 
+FROM INFORMATION_SCHEMA.TABLES 
+WHERE TABLE_SCHEMA = 'integration';
+
+-- 2. Test foreign key constraints
+SELECT 
+    fk.name as ForeignKeyName,
+    tp.name as ParentTable,
+    tr.name as ReferencedTable
+FROM sys.foreign_keys fk
+JOIN sys.tables tp ON fk.parent_object_id = tp.object_id
+JOIN sys.tables tr ON fk.referenced_object_id = tr.object_id
+WHERE tp.name = 'AffinityOrganizations';
+
+-- 3. Test integration data
+SELECT COUNT(*) as TotalMappings,
+       COUNT(CASE WHEN SyncStatus = 'Active' THEN 1 END) as Active,
+       MAX(LastSyncAtUtc) as LastSync
+FROM integration.AffinityOrganizations;
+```
+
+**Test Messaging Topology**:
+```bash
+# 1. Check RabbitMQ exchanges
+curl -u guest:guest http://localhost:15672/api/exchanges | jq '.[] | select(.name | contains("klim"))'
+
+# 2. Verify routing keys
+curl -u guest:guest http://localhost:15672/api/queues/klim.integration.affinity.sqlwriter/bindings
+
+# 3. Send test webhook
+curl -X POST "http://localhost:8088/webhooks/affinity/test-secret" \
+  -H "Content-Type: application/json" \
+  -H "X-Affinity-Event: organization.created" \
+  -H "X-Affinity-Delivery: test-delivery-123" \
+  --data '{"id":"test-org-456","name":"Test Organization","domain":"test.com"}'
+```
+
+**Test End-to-End Flow**:
+```bash
+# 1. Monitor logs in real-time
+tail -f logs/integration-*.log
+
+# 2. Send webhook and verify processing
+# (use curl command above)
+
+# 3. Check database for webhook storage
+SELECT TOP 5 EventType, ReceivedAt, DeliveryKey 
+FROM aff.WebhookEvents 
+ORDER BY ReceivedAt DESC;
+
+# 4. Check integration mapping
+SELECT TOP 5 AffinityOrganizationId, KLIMIssuerID, SyncStatus, LastSyncAtUtc
+FROM integration.AffinityOrganizations 
+ORDER BY UpdatedAtUtc DESC;
+```
+
+============================================================
+RISK ASSESSMENT & MITIGATION
+============================================================
+
+**HIGH RISK - Authentication Failures**:
+- **Risk**: Azure AD token acquisition fails in production
+- **Mitigation**: Implement comprehensive logging and fallback mechanisms
+- **Test**: Validate token refresh and connection resilience
+
+**MEDIUM RISK - Database Schema Conflicts**:
+- **Risk**: Integration tables conflict with existing business logic
+- **Mitigation**: Use separate integration schema with clear foreign keys
+- **Test**: Verify referential integrity and query performance
+
+**MEDIUM RISK - Message Routing Confusion**:
+- **Risk**: Messages routed to wrong exchanges or consumers
+- **Mitigation**: Use clearly differentiated exchange and routing key patterns
+- **Test**: Verify message isolation between KLIM.Events and KLIM.Integrations
+
+**LOW RISK - Configuration Complexity**:
+- **Risk**: Dual-source configuration creates confusion
+- **Mitigation**: Follow established KLIM.Events patterns exactly
+- **Test**: Validate configuration resolution in all environments
+
+============================================================
+POST-IMPLEMENTATION MONITORING
+============================================================
+
+**Key Metrics to Monitor**:
+```
+? Authentication Success Rate: > 99%
+? Webhook Processing Time: < 2 seconds average
+? Integration Mapping Accuracy: 100% (no orphaned records)
+? Message Routing Success: > 99.5%
+? Database Connection Health: Continuous uptime
+? Azure AD Token Refresh: Automatic and seamless
+```
+
+**Alerting Thresholds**:
+```
+?? CRITICAL: Authentication failures > 1% in 5 minutes
+?? CRITICAL: Database connection failures > 2 in 5 minutes
+??  WARNING: Webhook processing time > 5 seconds average
+??  WARNING: No webhook activity for > 2 hours
+?? INFO: Integration mapping growth rate and patterns
+```
+
+**Log Monitoring Queries**:
+```bash
+# Authentication issues
+grep "AcquireTokenAsync failed\|Connection failed" logs/*.log
+
+# Integration processing issues  
+grep "INTEGRATION DIAGNOSTICS FAILED\|SqlUpserter.*failed" logs/*.log
+
+# Message routing issues
+grep "routing.*failed\|exchange.*error" logs/*.log
+```
+
+============================================================
+CONCLUSION & NEXT STEPS
+============================================================
+
+The proposed KLIM.Integrations solution requires CRITICAL fixes to align with 
+KLIM.Events architecture patterns. The fixes are comprehensive but necessary for:
+
+1. **Production Reliability**: Azure AD authentication prevents SQL authentication vulnerabilities
+2. **Data Integrity**: Integration mapping tables maintain clean separation of concerns  
+3. **Operational Consistency**: Aligned messaging patterns simplify monitoring and troubleshooting
+4. **Future Extensibility**: Clean architecture supports additional integrations
+
+**IMPLEMENTATION TIMELINE**:
+- **Week 1**: Apply authentication and database schema fixes
+- **Week 2**: Implement messaging alignment and service updates  
+- **Week 3**: Docker deployment testing and validation
+- **Week 4**: Production deployment with monitoring
+
+**SUCCESS CRITERIA**:
+- ? Zero authentication failures in production
+- ? Clean integration data with proper foreign key relationships
+- ? Message routing isolation between KLIM.Events and KLIM.Integrations
+- ? Diagnostic monitoring matching KLIM.Events quality standards
+
+This document provides all necessary details for another AI to implement the fixes 
+correctly. The patterns are proven in production via KLIM.Events and will ensure 
+seamless integration architecture.

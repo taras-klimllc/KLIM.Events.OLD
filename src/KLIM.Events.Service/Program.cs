@@ -36,7 +36,8 @@ builder.Services.AddLogging(lb =>
     });
 });
 
-// Configuration
+// Configuration - consolidated database settings
+builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 builder.Services.Configure<ChangeTrackingOptions>(builder.Configuration.GetSection("ChangeTracking"));
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("MassTransit:Outbox"));
 
@@ -94,11 +95,11 @@ builder.Services.AddHostedService<ChangeTrackingPollingService>();
 builder.Services.AddHostedService<OutboxDispatcherService>();
 builder.Services.AddHostedService<OutboxDiagnosticService>();
 
-// Health checks
+// Health checks - use shared database configuration
+var dbOptions = builder.Configuration.GetSection("Database").Get<DatabaseOptions>()!;
 builder.Services.AddHealthChecks()
     .AddSqlServer(
-        connectionString: GetSanitizedConnectionString(
-            builder.Configuration.GetSection("ChangeTracking").Get<ChangeTrackingOptions>()!),
+        connectionString: GetSanitizedConnectionString(dbOptions),
         name: "sql",
         tags: new[] { "readiness" })
     .AddRabbitMQ(tags: new[] { "readiness" });
@@ -107,7 +108,7 @@ builder.Services.AddHostedService<HealthEndpointHostService>();
 
 await builder.Build().RunAsync();
 
-static string GetSanitizedConnectionString(ChangeTrackingOptions options)
+static string GetSanitizedConnectionString(DatabaseOptions options)
 {
     if (string.IsNullOrEmpty(options.ConnectionString) || !options.UseAzureAd)
         return options.ConnectionString;
@@ -120,12 +121,16 @@ static string GetSanitizedConnectionString(ChangeTrackingOptions options)
 
 public sealed record RabbitOptions(string Host, int Port, string VirtualHost, string Username, string Password);
 
-public sealed class ChangeTrackingOptions
+public sealed class DatabaseOptions
 {
     public string ConnectionString { get; set; } = string.Empty;
+    public bool UseAzureAd { get; set; } = false;
+}
+
+public sealed class ChangeTrackingOptions
+{
     public int PollingIntervalSeconds { get; set; } = 5;
     public int BatchSize { get; set; } = 500;
-    public bool UseAzureAd { get; set; } = false;
     public List<TrackedTableOption> Tables { get; set; } = new();
 
     public sealed record TrackedTableOption(string Schema, string Name, string Pk);
@@ -134,7 +139,6 @@ public sealed class ChangeTrackingOptions
 public sealed class OutboxOptions
 {
     public bool Enabled { get; set; } = true;
-    public string ConnectionString { get; set; } = string.Empty;
     public int DeliveryIntervalSeconds { get; set; } = 2;
     public int BatchSize { get; set; } = 100;
     public int MaxConcurrentDispatches { get; set; } = 10;
