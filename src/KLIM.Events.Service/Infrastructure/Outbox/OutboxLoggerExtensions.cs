@@ -6,6 +6,17 @@ namespace KLIM.Events.Service.Infrastructure.Outbox;
 public static class OutboxLoggerExtensions
 {
     /// <summary>
+    /// Extracts a friendly type name for logging purposes
+    /// </summary>
+    private static string GetFriendlyTypeName(string fullTypeName)
+    {
+        // Extract just the class name from either simple name or assembly qualified name
+        var typeName = fullTypeName.Split(',')[0]; // Remove assembly info
+        var lastDot = typeName.LastIndexOf('.');
+        return lastDot >= 0 ? typeName.Substring(lastDot + 1) : typeName;
+    }
+
+    /// <summary>
     /// Log successful message dispatch with all relevant details
     /// </summary>
     public static void LogOutboxDispatchSuccess(this ILogger logger,
@@ -22,10 +33,12 @@ public static class OutboxLoggerExtensions
         string entityType = "",
         string displayName = "")
     {
+        var friendlyTypeName = GetFriendlyTypeName(messageType);
+        
         using (logger.BeginScope(new Dictionary<string, object>
         {
             ["MessageId"] = messageId,
-            ["MessageType"] = messageType,
+            ["MessageType"] = friendlyTypeName, // Use friendly name in scope
             ["Exchange"] = exchange,
             ["RoutingKey"] = routingKey,
             ["SourceEntity"] = sourceEntity,
@@ -39,8 +52,8 @@ public static class OutboxLoggerExtensions
             ["Status"] = "SUCCESS"
         }))
         {
-            logger.LogInformation("? OUTBOX DISPATCH SUCCESS: {MessageId} | Type: {MessageType} | Exchange: {Exchange} | RoutingKey: {RoutingKey} | Source: {SourceEntity}#{SourceId} | ChangeVersion: {ChangeVersion} | Duration: {DurationMs}ms",
-                messageId, messageType, exchange, routingKey, sourceEntity, sourceId, changeVersion, durationMs);
+            logger.LogInformation("OUTBOX DISPATCH SUCCESS: {MessageId} | Type: {MessageType} | Exchange: {Exchange} | RoutingKey: {RoutingKey} | Source: {SourceEntity}#{SourceId} | ChangeVersion: {ChangeVersion} | Duration: {DurationMs}ms",
+                messageId, friendlyTypeName, exchange, routingKey, sourceEntity, sourceId, changeVersion, durationMs);
         }
     }
 
@@ -54,17 +67,19 @@ public static class OutboxLoggerExtensions
         string sourceEntity,
         string sourceId)
     {
+        var friendlyTypeName = GetFriendlyTypeName(messageType);
+        
         using (logger.BeginScope(new Dictionary<string, object>
         {
             ["MessageId"] = messageId,
-            ["MessageType"] = messageType,
+            ["MessageType"] = friendlyTypeName, // Use friendly name in scope
             ["SourceEntity"] = sourceEntity,
             ["SourceId"] = sourceId,
             ["Status"] = "ERROR"
         }))
         {
-            logger.LogError(exception, "? OUTBOX DISPATCH ERROR: {MessageId} | Type: {MessageType} | Source: {SourceEntity}#{SourceId}",
-                messageId, messageType, sourceEntity, sourceId);
+            logger.LogError(exception, "OUTBOX DISPATCH ERROR: {MessageId} | Type: {MessageType} | Source: {SourceEntity}#{SourceId}",
+                messageId, friendlyTypeName, sourceEntity, sourceId);
         }
     }
 

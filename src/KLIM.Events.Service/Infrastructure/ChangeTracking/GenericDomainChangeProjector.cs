@@ -9,7 +9,7 @@ namespace KLIM.Events.Service.Infrastructure.ChangeTracking;
 /// </summary>
 public sealed class GenericDomainChangeProjector : IChangeEventProjector
 {
-    private static readonly string EventType = typeof(DomainChangeNotification).AssemblyQualifiedName!;
+    private static readonly string EventType = typeof(DomainChangeNotification).Name; // Use simple name instead of AssemblyQualifiedName
     private readonly JsonSerializerOptions _json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     public bool Supports(string schema, string table) => true; // fallback, will run after specialized projectors

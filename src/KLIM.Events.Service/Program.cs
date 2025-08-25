@@ -6,6 +6,7 @@ using KLIM.Events.Service.Infrastructure.ChangeTracking;
 using KLIM.Events.Service.Infrastructure.HealthChecks;
 using MassTransit;
 using Serilog;
+using static KLIM.Events.Service.Infrastructure.ChangeTracking.GenericDomainChangeProjector;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -17,7 +18,23 @@ Log.Logger = new LoggerConfiguration()
     .CreateLogger();
 
 builder.Logging.ClearProviders();
-builder.Services.AddLogging(lb => lb.AddSerilog());
+builder.Services.AddLogging(lb => 
+{
+    lb.AddSerilog();
+    // Add a filter to suppress MassTransit SENT messages
+    lb.AddFilter("MassTransit", LogLevel.Warning);
+    lb.AddFilter("MassTransit.RabbitMqTransport", LogLevel.Error);
+    lb.AddFilter("MassTransit.Transports", LogLevel.Error);
+    lb.AddFilter((category, level) => 
+    {
+        // Filter out any log message that contains these patterns
+        if (category?.StartsWith("MassTransit") == true && level == LogLevel.Information)
+        {
+            return false;
+        }
+        return true;
+    });
+});
 
 // Configuration
 builder.Services.Configure<ChangeTrackingOptions>(builder.Configuration.GetSection("ChangeTracking"));
@@ -57,12 +74,18 @@ builder.Services.AddMassTransit(x =>
             r.Ignore<ArgumentException>();
         });
 
-        // Configure generic data change messages
+        // FIXED: Use the correct exchange name that matches your queue expectations
         cfg.Message<DataChangedV1>(m => m.SetEntityName("klim.change.events"));
-        cfg.Publish<DataChangedV1>(p => { p.ExchangeType = "topic"; });
+        cfg.Message<DomainChangeNotification>(m => m.SetEntityName("DomainChangeNotification"));
+        cfg.Message<DataChangeProcessed>(m => m.SetEntityName("DataChangeProcessed"));
 
-        // Versioned routing key
-        cfg.Send<DataChangedV1>(s => s.UseRoutingKeyFormatter(_ => "data.changed.v1"));
+        // Configure as topic exchange
+        cfg.Publish<DataChangedV1>(p => { 
+            p.ExchangeType = "topic"; 
+        });
+
+        // Remove the Send configuration since you're using Publish
+        // cfg.Send<DataChangedV1>(s => s.UseRoutingKeyFormatter(_ => "data.changed.v1"));
     });
 });
 

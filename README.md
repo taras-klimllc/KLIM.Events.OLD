@@ -90,6 +90,60 @@ for (int i = 0; i < mask.Length; i += 4)
 - ✅ Re-enabled audit field filtering for business-only change notifications
 - ✅ Cleaned up temporary diagnostic files
 
+### ✅ **SQL Server Ledger Column Fix (2025-01-22)**  
+**Issue**: Multiple dynamic `MSSQL_DroppedLedgerColumn_*` system columns and specific ledger fields (`ValidFrom`, `ledger_start_transaction_id`, `ledger_start_sequence_number`) were being included in `changedFields` JSON output, causing noise in business change events.
+
+**Root Cause**: 
+1. SQL Server's Ledger feature creates dynamic columns with the pattern `MSSQL_DroppedLedgerColumn_{ColumnName}_{GUID}` that couldn't be filtered with exact string matching
+2. The previous `AuditFields.Contains()` approach only handled exact matches, missing dynamic columns
+3. System ledger fields were being treated as business changes instead of audit fields
+
+**Fix Applied**: Implemented comprehensive audit field filtering with both exact matches and prefix patterns:
+```csharp
+// Enhanced audit field filtering
+private static readonly HashSet<string> AuditFields = new(StringComparer.OrdinalIgnoreCase)
+{
+    // Ledger fields (SQL Server 2022+ Ledger feature)
+    "ledger_start_transaction_id", "ledger_end_transaction_id",
+    "ledger_start_sequence_number", "ledger_end_sequence_number",
+    
+    // Temporal table fields  
+    "ValidFrom", "ValidTo",
+    
+    // Standard audit fields
+    "CreatedBy", "Created", "LastUpdatedBy", "LastUpdated"
+};
+
+// Dynamic column prefixes
+private static readonly string[] AuditFieldPrefixes = 
+{
+    "MSSQL_DroppedLedgerColumn_" // Catches all dynamic ledger columns
+};
+
+// Smart filtering method
+private static bool IsAuditField(string fieldName)
+{
+    // Check exact matches first (faster)
+    if (AuditFields.Contains(fieldName))
+        return true;
+        
+    // Check prefix matches for dynamic columns
+    return AuditFieldPrefixes.Any(prefix => 
+        fieldName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+}
+
+// Applied to both business logic and JSON output
+var businessChangedFields = change.ChangedColumns.Where(field => !IsAuditField(field)).ToArray();
+var changedFields = change.ChangedColumns.Where(field => !IsAuditField(field)).ToArray();
+```
+
+**Results**:
+- ✅ **Clean `changedFields` JSON** - No more system/audit columns in event output
+- ✅ **Pattern matching** - All `MSSQL_DroppedLedgerColumn_*` variants filtered out  
+- ✅ **Business fields preserved** - `VerticalID`, `MultiIssuerDeal` and other business fields properly included
+- ✅ **Reduced noise** - Only genuine business field changes generate events
+- ✅ **Future-proofed** - Handles new dynamic ledger columns automatically
+- ✅ **Performance optimized** - Exact match check first, then prefix matching
 ### 📊 **System Performance Metrics**
 After fixes, the service consistently delivers:
 

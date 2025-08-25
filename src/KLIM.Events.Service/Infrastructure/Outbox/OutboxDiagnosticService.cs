@@ -121,8 +121,9 @@ public sealed class OutboxDiagnosticService : BackgroundService
                 foreach (var msg in recentMessages)
                 {
                     var status = msg.Dispatched.HasValue ? "? SENT" : "? PENDING";
+                    var friendlyType = GetFriendlyTypeName(msg.Type);
                     _logger.LogInformation("  {Status} {Type} | {Entity}#{SourceId} | {Occurred:HH:mm:ss}",
-                        status, msg.Type, msg.Entity ?? "Unknown", msg.SourceId ?? "Unknown", msg.Occurred);
+                        status, friendlyType, msg.Entity ?? "Unknown", msg.SourceId ?? "Unknown", msg.Occurred);
                 }
             }
             else if (pendingCount == 0 && dispatchedCount == 0)
@@ -134,6 +135,15 @@ public sealed class OutboxDiagnosticService : BackgroundService
         {
             _logger.LogError(ex, "?? DIAGNOSTICS FAILED");
         }
+    }
+
+    private static string GetFriendlyTypeName(string fullType)
+    {
+        if (string.IsNullOrWhiteSpace(fullType)) return fullType;
+        // Remove assembly details if present
+        var primary = fullType.Split(',')[0];
+        var lastDot = primary.LastIndexOf('.');
+        return lastDot >= 0 ? primary[(lastDot + 1)..] : primary; // return simple class name
     }
 
     private (string ConnectionString, bool UseAzureAd) ResolveConnectionConfig()

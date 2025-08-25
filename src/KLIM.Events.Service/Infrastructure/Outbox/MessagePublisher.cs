@@ -1,4 +1,5 @@
 ﻿using KLIM.Events.Messaging.Contracts;
+using KLIM.Events.Service.Infrastructure.ChangeTracking;
 using MassTransit;
 using System.Text.Json;
 
@@ -30,7 +31,7 @@ public sealed class MessagePublisher
 
     public async Task<PublishResult> PublishAsync(OutboxMessage message, CancellationToken cancellationToken)
     {
-        var messageType = Type.GetType(message.Type);
+        var messageType = ResolveMessageType(message.Type);
         if (messageType == null)
         {
             _logger.LogError("Cannot find message type {Type} for message {Id}", message.Type, message.Id);
@@ -72,12 +73,20 @@ public sealed class MessagePublisher
             }
             ctx.MessageId = message.Id;
             ctx.Headers.Set("OccurredAt", message.OccurredAt.ToString("O"));
-            ctx.Headers.Set("PayloadSizeKB", (payloadSizeBytes / 1024).ToString()); // Add size info
+            ctx.Headers.Set("PayloadSizeKB", (payloadSizeBytes / 1024).ToString());
+            
+            // FIXED: Set the routing key for topic exchange
+            if (messageType == typeof(DataChangedV1))
+            {
+                ctx.SetRoutingKey("data.changed.v1");
+            }
             
         }, cancellationToken);
 
-        _logger.LogInformation("Successfully published message {Id} to {Exchange}/{RoutingKey} (size: {PayloadSize}KB)", 
-            message.Id, exchange, routingKey, payloadSizeBytes / 1024);
+        // Log our own clean message publishing event with short type name
+        var shortTypeName = GetShortTypeName(messageType);
+        _logger.LogInformation("PUBLISHED {MessageType} {MessageId} -> {Exchange}/{RoutingKey} ({PayloadSize}KB)", 
+            shortTypeName, message.Id, exchange, routingKey, payloadSizeBytes / 1024);
 
         var changeDetails = ExtractChangeDetails(messageObj);
         return PublishResult.Success(exchange, routingKey, changeDetails);
@@ -193,6 +202,32 @@ public sealed class MessagePublisher
         }
         
         return sanitized;
+    }
+
+    /// <summary>
+    /// Resolves message type from either simple name or fully qualified name
+    /// </summary>
+    private static Type? ResolveMessageType(string typeName)
+    {
+        // Handle simple names first (DataChangedV1, DomainChangeNotification, etc.)
+        switch (typeName)
+        {
+            case "DataChangedV1":
+                return typeof(DataChangedV1);
+            case "DomainChangeNotification":
+                return typeof(KLIM.Events.Service.Infrastructure.ChangeTracking.DomainChangeNotification);
+            case "DataChangeProcessed":
+                return typeof(DataChangeProcessed);
+            default:
+                // Fallback to Type.GetType for fully qualified names or other types
+                return Type.GetType(typeName);
+        }
+    }
+
+    private static string GetShortTypeName(Type type)
+    {
+        // Return simple type name without namespace
+        return type.Name;
     }
 }
 

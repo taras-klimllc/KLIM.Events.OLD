@@ -10,7 +10,7 @@ namespace KLIM.Events.Service.Infrastructure.ChangeTracking;
 /// </summary>
 public sealed class DealProjector : IChangeEventProjector
 {
-    private static readonly string EventType = typeof(DataChangedV1).AssemblyQualifiedName!;
+    private static readonly string EventType = typeof(DataChangedV1).Name; // Use simple name instead of AssemblyQualifiedName
     private readonly ILogger<DealProjector>? _logger;
     private readonly JsonSerializerOptions _json = new()
     {
@@ -64,10 +64,36 @@ public sealed class DealProjector : IChangeEventProjector
     // Audit fields to exclude from business change filtering
     private static readonly HashSet<string> AuditFields = new(StringComparer.OrdinalIgnoreCase)
     {
+        // Ledger fields (SQL Server 2022+ Ledger feature)
         "ledger_start_transaction_id", "ledger_end_transaction_id",
-        "ledger_start_sequence_number", "ledger_end_sequence_number", 
-        "ValidFrom", "ValidTo"
+        "ledger_start_sequence_number", "ledger_end_sequence_number",
+        "ledger_view_id", "ledger_transaction_id", "ledger_sequence_number",
+        
+        // Temporal table fields  
+        "ValidFrom", "ValidTo",
+        
+        // Standard audit fields
+        "CreatedBy", "Created", "LastUpdatedBy", "LastUpdated"
     };
+    
+    // Audit field prefixes for dynamic columns (e.g., MSSQL_DroppedLedgerColumn_*)
+    private static readonly string[] AuditFieldPrefixes = 
+    {
+        "MSSQL_DroppedLedgerColumn_"
+    };
+    
+    /// <summary>
+    /// Determines if a field should be considered an audit field and excluded from business change tracking
+    /// </summary>
+    private static bool IsAuditField(string fieldName)
+    {
+        // Check exact matches first (faster)
+        if (AuditFields.Contains(fieldName))
+            return true;
+            
+        // Check prefix matches for dynamic columns
+        return AuditFieldPrefixes.Any(prefix => fieldName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    }
 
     public bool Supports(string schema, string table) => (schema, table) is ("dbo", "Deals");
 
@@ -79,17 +105,17 @@ public sealed class DealProjector : IChangeEventProjector
         {
             var op = change.Operation;
             
-            // ?? FILTER: Skip audit-only changes
+            // Filter audit-only changes
             if (op == "U")
             {
                 var businessChangedFields = change.ChangedColumns
-                    .Where(field => !AuditFields.Contains(field))
+                    .Where(field => !IsAuditField(field))
                     .ToArray();
                     
                 if (businessChangedFields.Length == 0)
                 {
-                    // ?? NEW: Log skipped audit-only changes for visibility
-                    _logger?.LogDebug("?? Skipping audit-only update for Deal {EntityId} (version {ChangeVersion}): [{AuditFields}]", 
+                    // Log skipped audit-only changes for visibility
+                    _logger?.LogDebug("Skipping audit-only update for Deal {EntityId} (version {ChangeVersion}): [{AuditFields}]", 
                         change.Id, change.Version, string.Join(", ", change.ChangedColumns));
                     continue;
                 }
@@ -97,7 +123,7 @@ public sealed class DealProjector : IChangeEventProjector
                 {
                     // Mixed business + audit changes - log for awareness
                     var auditOnlyFields = change.ChangedColumns.Except(businessChangedFields).ToArray();
-                    _logger?.LogDebug("?? Processing mixed update for Deal {EntityId}: Business[{BusinessFields}] + Audit[{AuditFields}]", 
+                    _logger?.LogDebug("Processing mixed update for Deal {EntityId}: Business[{BusinessFields}] + Audit[{AuditFields}]", 
                         change.Id, string.Join(", ", businessChangedFields), string.Join(", ", auditOnlyFields));
                 }
             }
@@ -157,7 +183,7 @@ public sealed class DealProjector : IChangeEventProjector
             var changedFields = op switch
             {
                 "I" => new[] { "*" },
-                "U" => change.ChangedColumns,
+                "U" => change.ChangedColumns.Where(field => !IsAuditField(field)).ToArray(), // Filter audit fields from changedFields JSON
                 "D" => new[] { "__Deleted" },
                 _ => Array.Empty<string>()
             };

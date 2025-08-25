@@ -10,7 +10,7 @@ namespace KLIM.Events.Service.Infrastructure.ChangeTracking;
 /// </summary>
 public sealed class IssuerProjector : IChangeEventProjector
 {
-    private static readonly string EventType = typeof(DataChangedV1).AssemblyQualifiedName!;
+    private static readonly string EventType = typeof(DataChangedV1).Name; // Use simple name instead of AssemblyQualifiedName
     private readonly ILogger<IssuerProjector>? _logger;
     private readonly JsonSerializerOptions _json = new()
     {
@@ -60,10 +60,36 @@ public sealed class IssuerProjector : IChangeEventProjector
     // Audit fields to exclude from business change filtering  
     private static readonly HashSet<string> AuditFields = new(StringComparer.OrdinalIgnoreCase)
     {
+        // Ledger fields (SQL Server 2022+ Ledger feature)
         "ledger_start_transaction_id", "ledger_end_transaction_id",
-        "ledger_start_sequence_number", "ledger_end_sequence_number", 
-        "ValidFrom", "ValidTo"
+        "ledger_start_sequence_number", "ledger_end_sequence_number",
+        "ledger_view_id", "ledger_transaction_id", "ledger_sequence_number",
+        
+        // Temporal table fields  
+        "ValidFrom", "ValidTo",
+        
+        // Standard audit fields
+        "CreatedBy", "Created", "LastUpdatedBy", "LastUpdated"
     };
+    
+    // Audit field prefixes for dynamic columns (e.g., MSSQL_DroppedLedgerColumn_*)
+    private static readonly string[] AuditFieldPrefixes = 
+    {
+        "MSSQL_DroppedLedgerColumn_"
+    };
+    
+    /// <summary>
+    /// Determines if a field should be considered an audit field and excluded from business change tracking
+    /// </summary>
+    private static bool IsAuditField(string fieldName)
+    {
+        // Check exact matches first (faster)
+        if (AuditFields.Contains(fieldName))
+            return true;
+            
+        // Check prefix matches for dynamic columns
+        return AuditFieldPrefixes.Any(prefix => fieldName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    }
 
     public bool Supports(string schema, string table) => (schema, table) is ("dbo", "Issuers");
 
@@ -79,7 +105,7 @@ public sealed class IssuerProjector : IChangeEventProjector
             if (op == "U")
             {
                 var businessChangedFields = change.ChangedColumns
-                    .Where(field => !AuditFields.Contains(field))
+                    .Where(field => !IsAuditField(field))
                     .ToArray();
                 
                 // Log detected changes for monitoring
@@ -159,7 +185,7 @@ public sealed class IssuerProjector : IChangeEventProjector
             var changedFields = op switch
             {
                 "I" => new[] { "*" },
-                "U" => change.ChangedColumns,
+                "U" => change.ChangedColumns.Where(field => !IsAuditField(field)).ToArray(), // Filter audit fields from changedFields JSON
                 "D" => new[] { "__Deleted" },
                 _ => Array.Empty<string>()
             };

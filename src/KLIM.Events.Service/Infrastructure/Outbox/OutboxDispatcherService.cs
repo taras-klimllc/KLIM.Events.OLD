@@ -217,7 +217,7 @@ public sealed class OutboxDispatcherService : BackgroundService
             ["DisplayName"] = details.DisplayName
         });
 
-        _logger.LogInformation("🔄 Routed {Operation} on {EntityType} {DisplayName} via {Exchange}/{RoutingKey}",
+        _logger.LogInformation("Routed {Operation} on {EntityType} {DisplayName} via {Exchange}/{RoutingKey}",
             details.Operation, details.EntityType, details.DisplayName, publishResult.Exchange, publishResult.RoutingKey);
     }
 
