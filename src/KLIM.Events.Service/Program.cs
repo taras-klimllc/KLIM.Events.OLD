@@ -1,10 +1,11 @@
-using KLIM.Events.Logging;
+﻿using KLIM.Events.Logging;
 using KLIM.Events.Messaging.Consumers;
 using KLIM.Events.Messaging.Contracts;
 using KLIM.Events.Service.Infrastructure.Outbox;
 using KLIM.Events.Service.Infrastructure.ChangeTracking;
 using KLIM.Events.Service.Infrastructure.HealthChecks;
 using MassTransit;
+using Microsoft.Extensions.Options;
 using Serilog;
 using static KLIM.Events.Service.Infrastructure.ChangeTracking.GenericDomainChangeProjector;
 
@@ -36,10 +37,11 @@ builder.Services.AddLogging(lb =>
     });
 });
 
-// Configuration - consolidated database settings
+// Configuration - consolidated database settings and KLIM-standard RabbitMQ
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 builder.Services.Configure<ChangeTrackingOptions>(builder.Configuration.GetSection("ChangeTracking"));
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("MassTransit:Outbox"));
+builder.Services.Configure<RabbitMQOptions>(builder.Configuration.GetSection("RabbitMQ"));
 
 // Outbox services
 builder.Services.AddSingleton<SqlAuthenticationService>();
@@ -52,7 +54,7 @@ builder.Services.AddSingleton<IChangeEventProjector, IssuerProjector>();
 builder.Services.AddSingleton<IChangeEventProjector, DealProjector>();
 builder.Services.AddSingleton<IChangeEventProjector, GenericDomainChangeProjector>();
 
-// MassTransit
+// MassTransit - KLIM Standards Compliant Configuration
 builder.Services.AddMassTransit(x =>
 {
     x.SetKebabCaseEndpointNameFormatter();
@@ -60,11 +62,12 @@ builder.Services.AddMassTransit(x =>
 
     x.UsingRabbitMq((context, cfg) =>
     {
-        var mq = builder.Configuration.GetSection("MassTransit:RabbitMQ").Get<RabbitOptions>()!;
-        cfg.Host(mq.Host, (ushort)mq.Port, mq.VirtualHost, h =>
-        {
-            h.Username(mq.Username);
-            h.Password(mq.Password);
+        var mq = context.GetRequiredService<IOptions<RabbitMQOptions>>().Value;
+        
+        cfg.Host(mq.Host, h => 
+        { 
+            h.Username(mq.Username); 
+            h.Password(mq.Password); 
         });
 
         cfg.UseConsumeFilter(typeof(CorrelationConsumeFilter<>), context);
@@ -75,18 +78,21 @@ builder.Services.AddMassTransit(x =>
             r.Ignore<ArgumentException>();
         });
 
-        // FIXED: Use the correct exchange name that matches your queue expectations
-        cfg.Message<DataChangedV1>(m => m.SetEntityName("klim.change.events"));
-        cfg.Message<DomainChangeNotification>(m => m.SetEntityName("DomainChangeNotification"));
-        cfg.Message<DataChangeProcessed>(m => m.SetEntityName("DataChangeProcessed"));
+        // KLIM Standard: Configure messages to use shared domain exchange
+        cfg.Message<DataChangedV1>(m => m.SetEntityName(mq.ExchangeName));
+        cfg.Message<DomainChangeNotification>(m => m.SetEntityName(mq.ExchangeName));
+        cfg.Message<DataChangeProcessed>(m => m.SetEntityName(mq.ExchangeName));
 
-        // Configure as topic exchange
+        // KLIM Standard: Configure as topic exchange
         cfg.Publish<DataChangedV1>(p => { 
             p.ExchangeType = "topic"; 
         });
-
-        // Remove the Send configuration since you're using Publish
-        // cfg.Send<DataChangedV1>(s => s.UseRoutingKeyFormatter(_ => "data.changed.v1"));
+        cfg.Publish<DomainChangeNotification>(p => { 
+            p.ExchangeType = "topic"; 
+        });
+        cfg.Publish<DataChangeProcessed>(p => { 
+            p.ExchangeType = "topic"; 
+        });
     });
 });
 
@@ -119,7 +125,15 @@ static string GetSanitizedConnectionString(DatabaseOptions options)
     return builder.ConnectionString;
 }
 
-public sealed record RabbitOptions(string Host, int Port, string VirtualHost, string Username, string Password);
+// KLIM Standard: RabbitMQ Configuration Class
+public sealed class RabbitMQOptions
+{
+    public string Host { get; init; } = "localhost";
+    public string Username { get; init; } = "guest";
+    public string Password { get; init; } = "guest";
+    public string ExchangeName { get; init; } = "klim.events"; // ✅ CLEAN: Simple and direct
+    public string RoutingKeyPrefix { get; init; } = "klim.events"; // ✅ CONSISTENT: Same clean pattern
+}
 
 public sealed class DatabaseOptions
 {

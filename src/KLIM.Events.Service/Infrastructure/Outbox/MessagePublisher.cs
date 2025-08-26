@@ -1,17 +1,19 @@
 ﻿using KLIM.Events.Messaging.Contracts;
 using KLIM.Events.Service.Infrastructure.ChangeTracking;
 using MassTransit;
+using Microsoft.Extensions.Options;
 using System.Text.Json;
 
 namespace KLIM.Events.Service.Infrastructure.Outbox;
 
 /// <summary>
-/// Handles message publishing to RabbitMQ via MassTransit with payload monitoring and optimization
+/// Handles message publishing to RabbitMQ via MassTransit with KLIM-standard routing and payload monitoring
 /// </summary>
 public sealed class MessagePublisher
 {
     private readonly IBus _bus;
     private readonly ILogger<MessagePublisher> _logger;
+    private readonly RabbitMQOptions _rabbitOptions;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -23,10 +25,11 @@ public sealed class MessagePublisher
     private const int LARGE_PAYLOAD_THRESHOLD = 500 * 1024; // 500KB warning threshold
     private const int MAX_TEXT_FIELD_LENGTH = 10 * 1024; // 10KB per text field
 
-    public MessagePublisher(IBus bus, ILogger<MessagePublisher> logger)
+    public MessagePublisher(IBus bus, ILogger<MessagePublisher> logger, IOptions<RabbitMQOptions> rabbitOptions)
     {
         _bus = bus;
         _logger = logger;
+        _rabbitOptions = rabbitOptions.Value;
     }
 
     public async Task<PublishResult> PublishAsync(OutboxMessage message, CancellationToken cancellationToken)
@@ -57,29 +60,44 @@ public sealed class MessagePublisher
         }
 
         var headers = ParseHeaders(message.Headers);
-        var exchange = GetExchange(messageType);
-        var routingKey = GetRoutingKey(messageType);
+        var exchange = _rabbitOptions.ExchangeName;
+        var routingKey = GetKlimStandardRoutingKey(messageType, messageObj);
 
         _logger.LogDebug("Publishing message {Id} to exchange {Exchange} with routing key {RoutingKey} (size: {PayloadSize}KB)", 
             message.Id, exchange, routingKey, payloadSizeBytes / 1024);
 
-        // Use the correct routing - publish to the topic exchange with routing key
+        // KLIM Standard: Publish with proper routing key and headers
         await _bus.Publish(messageObj, ctx =>
         {
+            // Set KLIM standard routing key
+            ctx.SetRoutingKey(routingKey);
+            
+            // KLIM Standard: Set standard headers
+            ctx.Headers.Set("source", "events.service");
+            ctx.Headers.Set("version", GetMessageVersion(messageType));
+            ctx.Headers.Set("correlation_id", message.Id.ToString());
+            ctx.Headers.Set("timestamp_utc", DateTime.UtcNow.ToString("O"));
+            ctx.Headers.Set("payload_size_bytes", payloadSizeBytes.ToString());
+            
+            // Add entity-specific headers for DataChangedV1
+            if (messageObj is DataChangedV1 dataChange)
+            {
+                ctx.Headers.Set("event_type", $"{dataChange.EntityType.ToLowerInvariant()}.{dataChange.Operation.ToLowerInvariant()}");
+                ctx.Headers.Set("entity_type", dataChange.EntityType.ToLowerInvariant());
+                ctx.Headers.Set("entity_id", dataChange.EntityId.ToString());
+            }
+            
+            // Add custom headers from message
             if (headers != null)
             {
                 foreach (var header in headers)
                     ctx.Headers.Set(header.Key, header.Value);
             }
+            
+            // MassTransit standard headers
             ctx.MessageId = message.Id;
             ctx.Headers.Set("OccurredAt", message.OccurredAt.ToString("O"));
             ctx.Headers.Set("PayloadSizeKB", (payloadSizeBytes / 1024).ToString());
-            
-            // FIXED: Set the routing key for topic exchange
-            if (messageType == typeof(DataChangedV1))
-            {
-                ctx.SetRoutingKey("data.changed.v1");
-            }
             
         }, cancellationToken);
 
@@ -90,6 +108,36 @@ public sealed class MessagePublisher
 
         var changeDetails = ExtractChangeDetails(messageObj);
         return PublishResult.Success(exchange, routingKey, changeDetails);
+    }
+
+    /// <summary>
+    /// KLIM Standard: Generate routing keys following klim.events.{entity}.{operation}.{version} pattern
+    /// </summary>
+    private string GetKlimStandardRoutingKey(Type messageType, object messageObj)
+    {
+        return messageType switch
+        {
+            var t when t == typeof(DataChangedV1) && messageObj is DataChangedV1 dataChange =>
+                $"klim.events.{dataChange.EntityType.ToLowerInvariant()}.{dataChange.Operation.ToLowerInvariant()}.v1",
+            
+            var t when t == typeof(DomainChangeNotification) =>
+                "klim.events.domain.notification.v1",
+            
+            var t when t == typeof(DataChangeProcessed) =>
+                "klim.events.processing.completed.v1",
+            
+            _ => $"klim.events.{messageType.Name.ToLowerInvariant()}.v1"
+        };
+    }
+
+    /// <summary>
+    /// Get message version for headers
+    /// </summary>
+    private static string GetMessageVersion(Type messageType)
+    {
+        return messageType.Name.EndsWith("V1") ? "v1" :
+               messageType.Name.EndsWith("V2") ? "v2" :
+               "v1"; // Default to v1
     }
 
     private Dictionary<string, object>? ParseHeaders(string? headersJson)
@@ -107,13 +155,6 @@ public sealed class MessagePublisher
             return null;
         }
     }
-
-    private static string GetExchange(Type messageType) =>
-        messageType == typeof(DataChangedV1) ? "klim.change.events" : "klim.change.events";
-
-    private static string GetRoutingKey(Type messageType) => messageType == typeof(DataChangedV1)
-        ? "data.changed.v1"  // Keep the original routing key with dot
-        : messageType.Name.ToLowerInvariant();
 
     private static ChangeDetails ExtractChangeDetails(object messageObj)
     {
