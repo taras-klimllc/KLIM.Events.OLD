@@ -1,0 +1,678 @@
+# MassTransit & RabbitMQ Naming Principles & Standards
+# Version: 2025-01-26 (Updated with KLIM.Events Implementation)
+# Purpose: Comprehensive naming conventions for enterprise messaging solutions
+
+## Table of Contents
+1. Exchange Naming Conventions
+2. Queue Naming Conventions  
+3. Routing Key Standards
+4. Message Type Configuration
+5. Environment-Based Naming
+6. Configuration Best Practices
+7. Implementation Examples
+8. Anti-Patterns to Avoid
+9. Validation Rules
+10. Quick Reference Guide
+11. **KLIM.Events Real-World Implementation**
+12. **Production Headers & Monitoring**
+
+---
+
+## 1. Exchange Naming Conventions
+
+### Base Pattern:
+{company}.{domain}[.{environment}]
+
+### Examples:
+? GOOD:
+- klim.events
+- acme.commands
+- contoso.notifications
+- fabrikam.queries
+
+? WITH ENVIRONMENT:
+- klim.events.dev
+- klim.events.staging  
+- klim.events.prod
+
+? BAD:
+- KLIM_Events (uppercase, underscores)
+- klim-events (hyphens in exchange names)
+- events (missing company identifier)
+- klim.events.2024 (dates in names)
+
+### Rules:
+- Use lowercase letters only
+- Separate with dots (.) not hyphens or underscores
+- Start with company/organization identifier
+- Include domain context (events, commands, queries, notifications)
+- Add environment suffix for multi-environment deployments
+- Keep names descriptive but concise (max 50 characters)
+- Avoid special characters except dots
+
+---
+
+## 2. Queue Naming Conventions
+
+MassTransit auto-generates queue names using endpoint formatters:
+
+### Recommended Formatter:
+```csharp
+x.SetKebabCaseEndpointNameFormatter();
+```
+
+### Generated Pattern:
+{service-name}_{message-type-name}
+
+### Examples:
+? GENERATED NAMES:
+- events-service_data-changed-v1
+- notification-service_domain-change-notification
+- audit-service_issuer-updated-v1
+- reporting-service_deal-created-v1
+
+### Dead Letter Queue Pattern:
+{exchange-name}.{message-type}.dlq
+
+### Examples:
+- klim.events.dev.datachanged.v1.dlq
+- klim.commands.prod.createissuer.v1.dlq
+
+---
+
+## 3. Routing Key Standards
+
+### Base Pattern:
+{company}.{domain}.{entity}.{operation}.{version}
+
+### Examples:
+? DATA CHANGE EVENTS:
+- klim.events.issuer.created.v1
+- klim.events.deal.updated.v1
+- klim.events.instrument.deleted.v1
+- klim.events.portfolio.archived.v1
+
+? DOMAIN NOTIFICATIONS:
+- klim.events.domain.notification.v1
+- klim.events.domain.alert.v1
+
+? COMMANDS:
+- klim.commands.issuer.create.v1
+- klim.commands.deal.approve.v1
+
+? QUERIES:
+- klim.queries.issuer.getbyid.v1
+- klim.queries.deal.search.v1
+
+### Wildcard Patterns for Consumers:
+- klim.events.*.created.v1 (all creation events)
+- klim.events.issuer.*.v1 (all issuer events)
+- klim.events.#.v1 (all v1 events)
+- klim.events.*.updated.# (all update events, any version)
+
+---
+
+## 4. Message Type Configuration
+
+### Configuration Pattern:
+```csharp
+// Set exchange name explicitly
+cfg.Message<DataChangedV1>(m => m.SetEntityName(exchangeName));
+
+// Configure exchange type
+cfg.Publish<DataChangedV1>(p => p.ExchangeType = "topic");
+```
+
+### Exchange Type Selection:
+
+#### Topic Exchange (Recommended):
+- Use for event-driven architectures
+- Supports pattern-based routing
+- Enables selective consumption
+- Best for: DataChangedV1, DomainEvents, Notifications
+
+#### Direct Exchange:
+- Use for exact routing key matches
+- Point-to-point messaging
+- Best for: Commands, Queries
+
+#### Fanout Exchange:
+- Use for broadcasting to all consumers
+- Ignores routing key
+- Best for: System-wide announcements
+
+---
+
+## 5. Environment-Based Naming
+
+### Pattern:
+{base-name}.{environment}
+
+### Environment Identifiers:
+? STANDARD ENVIRONMENTS:
+- dev (development)
+- test (testing)
+- staging (pre-production)
+- prod (production)
+
+? SPECIALIZED ENVIRONMENTS:
+- sandbox (experimental)
+- perf (performance testing)
+- demo (demonstration)
+
+### Examples:
+```csharp
+// Configuration
+public string Environment { get; init; } = "dev";
+public string FullExchangeName => $"{ExchangeName}.{Environment}";
+
+// Results:
+// klim.events.dev
+// klim.events.staging  
+// klim.events.prod
+```
+
+### Benefits:
+- Complete environment isolation
+- No cross-environment message leakage
+- Clear operational boundaries
+- Simplified deployment pipelines
+
+---
+
+## 6. Configuration Best Practices
+
+### Type-Safe Configuration:
+```csharp
+public sealed class RabbitMQOptions
+{
+    [Required]
+    [RegularExpression(@"^[a-z]+\.[a-z]+$")]
+    public string ExchangeName { get; init; } = "klim.events";
+    
+    [Required]
+    [RegularExpression(@"^[a-z]+$")]
+    public string Environment { get; init; } = "dev";
+    
+    public string FullExchangeName => $"{ExchangeName}.{Environment}";
+    
+    public string GetDataChangeRoutingKey(string entity, string operation, string version = "v1") =>
+        $"{RoutingKeyPrefix}.{entity.ToLowerInvariant()}.{operation.ToLowerInvariant()}.{version}";
+}
+```
+
+### Validation Rules:
+- Use DataAnnotations for compile-time validation
+- Implement regex patterns for naming conventions
+- Add ValidateOnStart() for startup validation
+- Create helper methods for routing key generation
+
+### Centralized Templates:
+```csharp
+public string DataChangeRoutingKeyTemplate { get; init; } = "{prefix}.{entity}.{operation}.{version}";
+public string DomainNotificationRoutingKey { get; init; } = "{prefix}.domain.notification.v1";
+public string DeadLetterSuffix { get; init; } = "dlq";
+```
+
+---
+
+## 7. Implementation Examples
+
+### Complete MassTransit Configuration:
+```csharp
+builder.Services.AddMassTransit(x =>
+{
+    // Use kebab-case for consistent naming
+    x.SetKebabCaseEndpointNameFormatter();
+    
+    x.UsingRabbitMq((context, cfg) =>
+    {
+        var mq = context.GetRequiredService<IOptions<RabbitMQOptions>>().Value;
+
+        cfg.Host(mq.Host, h =>
+        {
+            h.Username(mq.Username);
+            h.Password(mq.Password);
+        });
+
+        // Environment-aware exchange configuration
+        cfg.Message<DataChangedV1>(m => m.SetEntityName(mq.FullExchangeName));
+        cfg.Message<DomainChangeNotification>(m => m.SetEntityName(mq.FullExchangeName));
+
+        // Topic exchange for flexible routing
+        cfg.Publish<DataChangedV1>(p => p.ExchangeType = "topic");
+        cfg.Publish<DomainChangeNotification>(p => p.ExchangeType = "topic");
+        
+        // Dead letter queue configuration
+        cfg.ReceiveEndpoint("failed-messages", e =>
+        {
+            e.Bind(mq.DeadLetterExchangeName);
+        });
+    });
+});
+```
+
+### Routing Key Generation:
+```csharp
+public class MessagePublisher
+{
+    private readonly RabbitMQOptions _options;
+    
+    private string GetRoutingKey(Type messageType, object messageObj)
+    {
+        return messageType switch
+        {
+            var t when t == typeof(DataChangedV1) && messageObj is DataChangedV1 dataChange =>
+                _options.GetDataChangeRoutingKey(dataChange.EntityType, dataChange.Operation),
+                
+            var t when t == typeof(DomainChangeNotification) =>
+                _options.GetDomainNotificationRoutingKey(),
+                
+            _ => $"{_options.RoutingKeyPrefix}.{messageType.Name.ToLowerInvariant()}.v1"
+        };
+    }
+}
+```
+
+---
+
+## 8. Anti-Patterns to Avoid
+
+? **DON'T DO THIS:**
+
+### Inconsistent Casing:
+- KlimEvents (PascalCase)
+- klim_events (snake_case with underscores)
+- KLIM-EVENTS (UPPERCASE with hyphens)
+
+### Special Characters:
+- klim@events (@ symbol)
+- klim.events! (exclamation)
+- klim.events.2024 (numbers as suffixes)
+
+### Environment in Message Types:
+- DataChangedV1Prod (environment in type name)
+- DevIssuerCreated (environment prefix)
+
+### Hardcoded Names:
+```csharp
+// BAD: Hardcoded exchange names
+cfg.Message<DataChangedV1>(m => m.SetEntityName("klim.events.prod"));
+
+// GOOD: Configuration-driven
+cfg.Message<DataChangedV1>(m => m.SetEntityName(mq.FullExchangeName));
+```
+
+### Long Names:
+- very-long-extremely-descriptive-exchange-name-that-exceeds-reasonable-limits
+
+### Mixed Separators:
+- klim.events_dev (mixing dots and underscores)
+- klim-events.prod (mixing hyphens and dots)
+
+---
+
+## 9. Validation Rules
+
+### Exchange Names:
+- Pattern: ^[a-z]+\.[a-z]+$
+- Min Length: 5 characters
+- Max Length: 50 characters
+- Required: company.domain format
+
+### Environment Names:
+- Pattern: ^[a-z]+$
+- Min Length: 2 characters
+- Max Length: 10 characters
+- Allowed: dev, test, staging, prod, sandbox, perf, demo
+
+### Routing Keys:
+- Pattern: ^[a-z]+\.[a-z]+\.[a-z]+\.[a-z]+\.v[0-9]+$
+- Components: prefix.entity.operation.version
+- Max Length: 100 characters
+- Version format: v1, v2, v3, etc.
+
+### Implementation:
+```csharp
+[RegularExpression(@"^[a-z]+\.[a-z]+$", 
+    ErrorMessage = "Exchange name must follow 'company.domain' pattern")]
+public string ExchangeName { get; init; } = "klim.events";
+
+[RegularExpression(@"^[a-z]+$", 
+    ErrorMessage = "Environment must be lowercase letters only")]
+public string Environment { get; init; } = "dev";
+```
+
+---
+
+## 10. Quick Reference Guide
+
+### Exchange Names:
+? klim.events.prod
+? acme.commands.dev
+? contoso.notifications.staging
+
+### Queue Names (Auto-Generated):
+? events-service_data-changed-v1
+? audit-service_issuer-created-v1
+
+### Routing Keys:
+? klim.events.issuer.created.v1
+? klim.events.deal.updated.v1
+? klim.events.domain.notification.v1
+
+### Dead Letter Queues:
+? klim.events.prod.dlq
+? klim.events.datachanged.v1.dlq
+
+### Configuration Validation:
+```csharp
+builder.Services.AddOptionsWithValidateOnStart<RabbitMQOptions>();
+```
+
+### Endpoint Formatter:
+```csharp
+x.SetKebabCaseEndpointNameFormatter();
+```
+
+### Exchange Types:
+- topic: Event-driven patterns with routing
+- direct: Point-to-point messaging
+- fanout: Broadcast messaging
+
+---
+
+## 11. KLIM.Events Real-World Implementation ? **NEW**
+
+### **Complete RabbitMQOptions Class (Production-Ready):**
+```csharp
+/// <summary>
+/// KLIM Standard: RabbitMQ Configuration Class
+/// Implements enterprise naming conventions for exchanges, routing keys, and queues
+/// </summary>
+public sealed class RabbitMQOptions
+{
+    /// <summary>RabbitMQ host (e.g., "rabbitmq.company.com" or "localhost")</summary>
+    [Required]
+    public string Host { get; init; } = "localhost";
+    
+    /// <summary>RabbitMQ username for authentication</summary>
+    [Required]
+    public string Username { get; init; } = "guest";
+    
+    /// <summary>RabbitMQ password for authentication</summary>
+    [Required]
+    public string Password { get; init; } = "guest";
+    
+    /// <summary>
+    /// Base exchange name following {company}.{domain} pattern
+    /// Examples: "klim.events", "acme.commands", "contoso.notifications"
+    /// </summary>
+    [Required]
+    [RegularExpression(@"^[a-z]+\.[a-z]+$", ErrorMessage = "Exchange name must follow 'company.domain' pattern with lowercase letters")]
+    public string ExchangeName { get; init; } = "klim.events";
+    
+    /// <summary>
+    /// Environment identifier for multi-environment deployments
+    /// Examples: "dev", "staging", "prod"
+    /// </summary>
+    [Required]
+    [RegularExpression(@"^[a-z]+$", ErrorMessage = "Environment must be lowercase letters only")]
+    public string Environment { get; init; } = "dev";
+    
+    /// <summary>
+    /// Routing key prefix following {company}.{domain} pattern
+    /// Used as base for all message routing keys
+    /// </summary>
+    [Required]
+    [RegularExpression(@"^[a-z]+\.[a-z]+$", ErrorMessage = "Routing key prefix must follow 'company.domain' pattern")]
+    public string RoutingKeyPrefix { get; init; } = "klim.events";
+    
+    /// <summary>
+    /// Template for data change event routing keys
+    /// Pattern: {prefix}.{entity}.{operation}.{version}
+    /// Example: "klim.events.issuer.created.v1"
+    /// </summary>
+    public string DataChangeRoutingKeyTemplate { get; init; } = "{prefix}.{entity}.{operation}.{version}";
+    
+    /// <summary>
+    /// Routing key for domain notification messages
+    /// Pattern: {prefix}.domain.notification.{version}
+    /// </summary>
+    public string DomainNotificationRoutingKey { get; init; } = "{prefix}.domain.notification.v1";
+    
+    /// <summary>
+    /// Dead letter exchange suffix for failed message handling
+    /// Results in: "{FullExchangeName}.dlq"
+    /// </summary>
+    public string DeadLetterSuffix { get; init; } = "dlq";
+    
+    /// <summary>
+    /// Environment-aware full exchange name
+    /// Pattern: {ExchangeName}.{Environment}
+    /// Examples: "klim.events.dev", "klim.events.prod"
+    /// </summary>
+    public string FullExchangeName => $"{ExchangeName}.{Environment}";
+    
+    /// <summary>
+    /// Dead letter exchange name for failed messages
+    /// Pattern: {FullExchangeName}.{DeadLetterSuffix}
+    /// Example: "klim.events.prod.dlq"
+    /// </summary>
+    public string DeadLetterExchangeName => $"{FullExchangeName}.{DeadLetterSuffix}";
+    
+    /// <summary>
+    /// Generates a routing key for data change events
+    /// </summary>
+    /// <param name="entityType">Entity type (e.g., "issuer", "deal")</param>
+    /// <param name="operation">Operation type (e.g., "created", "updated", "deleted")</param>
+    /// <param name="version">Message version (e.g., "v1", "v2")</param>
+    /// <returns>Formatted routing key</returns>
+    public string GetDataChangeRoutingKey(string entityType, string operation, string version = "v1") =>
+        DataChangeRoutingKeyTemplate
+            .Replace("{prefix}", RoutingKeyPrefix)
+            .Replace("{entity}", entityType.ToLowerInvariant())
+            .Replace("{operation}", operation.ToLowerInvariant())
+            .Replace("{version}", version.ToLowerInvariant());
+    
+    /// <summary>
+    /// Generates a routing key for domain notifications
+    /// </summary>
+    /// <param name="version">Message version (default: "v1")</param>
+    /// <returns>Formatted routing key</returns>
+    public string GetDomainNotificationRoutingKey(string version = "v1") =>
+        DomainNotificationRoutingKey
+            .Replace("{prefix}", RoutingKeyPrefix)
+            .Replace("{version}", version.ToLowerInvariant());
+}
+```
+
+### **Production Configuration (appsettings.json):**
+```json
+{
+  "RabbitMQ": {
+    "Host": "localhost",
+    "Username": "guest",
+    "Password": "guest",
+    "ExchangeName": "klim.events",
+    "Environment": "dev",
+    "RoutingKeyPrefix": "klim.events",
+    "DataChangeRoutingKeyTemplate": "{prefix}.{entity}.{operation}.{version}",
+    "DomainNotificationRoutingKey": "{prefix}.domain.notification.v1",
+    "DeadLetterSuffix": "dlq"
+  }
+}
+```
+
+### **MessagePublisher Implementation (Production-Ready):**
+```csharp
+/// <summary>
+/// KLIM Standard: Generate routing keys using centralized configuration templates
+/// Leverages RabbitMQOptions helper methods for consistent naming
+/// </summary>
+private string GetStandardRoutingKey(Type messageType, object messageObj)
+{
+    return messageType switch
+    {
+        var t when t == typeof(DataChangedV1) && messageObj is DataChangedV1 dataChange =>
+            _rabbitOptions.GetDataChangeRoutingKey(dataChange.EntityType, dataChange.Operation),
+
+        var t when t == typeof(DomainChangeNotification) =>
+            _rabbitOptions.GetDomainNotificationRoutingKey(),
+
+        _ => $"{_rabbitOptions.RoutingKeyPrefix}.{messageType.Name.ToLowerInvariant()}.v1"
+    };
+}
+
+// Use environment-aware exchange name
+var exchange = _rabbitOptions.FullExchangeName;
+var routingKey = GetStandardRoutingKey(messageType, messageObj);
+```
+
+---
+
+## 12. Production Headers & Monitoring ? **NEW**
+
+### **KLIM Standard Headers (Real Implementation):**
+```csharp
+// KLIM Standard: Set standard headers
+ctx.Headers.Set("source", "events.service");
+ctx.Headers.Set("version", GetMessageVersion(messageType));
+ctx.Headers.Set("correlation_id", message.Id.ToString());
+ctx.Headers.Set("timestamp_utc", DateTime.UtcNow.ToString("O"));
+ctx.Headers.Set("payload_size_bytes", payloadSizeBytes.ToString());
+ctx.Headers.Set("environment", _rabbitOptions.Environment);
+ctx.Headers.Set("exchange", exchange);
+
+// Add entity-specific headers for DataChangedV1
+if (messageObj is DataChangedV1 dataChange)
+{
+    ctx.Headers.Set("event_type", $"{dataChange.EntityType.ToLowerInvariant()}.{dataChange.Operation.ToLowerInvariant()}");
+    ctx.Headers.Set("entity_type", dataChange.EntityType.ToLowerInvariant());
+    ctx.Headers.Set("entity_id", dataChange.EntityId.ToString());
+}
+```
+
+### **Production Monitoring Implementation:**
+```csharp
+// Payload size monitoring with environment context
+private void MonitorPayloadSize(Guid messageId, int payloadSizeBytes)
+{
+    if (payloadSizeBytes > LARGE_PAYLOAD_THRESHOLD)
+    {
+        using var scope = _logger.BeginScope(new Dictionary<string, object>
+        {
+            ["MessageId"] = messageId,
+            ["PayloadSizeBytes"] = payloadSizeBytes,
+            ["PayloadSizeKB"] = payloadSizeBytes / 1024,
+            ["PayloadSizeMB"] = payloadSizeBytes / (1024.0 * 1024.0),
+            ["Environment"] = _rabbitOptions.Environment,
+            ["Exchange"] = _rabbitOptions.FullExchangeName
+        });
+
+        _logger.LogWarning("Large payload detected: {PayloadSize}KB for message {MessageId} (threshold: {Threshold}KB)",
+            payloadSizeBytes / 1024, messageId, LARGE_PAYLOAD_THRESHOLD / 1024);
+    }
+}
+```
+
+### **Production Logging Pattern:**
+```csharp
+// Clean message publishing event with environment context
+_logger.LogInformation("PUBLISHED {MessageType} {MessageId} -> {Exchange}/{RoutingKey} ({PayloadSize}KB)",
+    shortTypeName, message.Id, exchange, routingKey, payloadSizeBytes / 1024);
+```
+
+---
+
+## Best Practices Checklist:
+
+? Use lowercase with dot separators for exchanges
+? Include company identifier in all names
+? Add environment suffix for multi-environment deployments
+? Use kebab-case endpoint formatter in MassTransit
+? Configure topic exchanges for flexible routing
+? Implement configuration validation with DataAnnotations
+? Create helper methods for routing key generation
+? Use centralized configuration templates
+? Avoid hardcoded names in business logic
+? Document naming conventions in code comments
+? Test naming patterns with unit tests
+? Monitor naming consistency in production logs
+? **Add environment and exchange info to message headers**
+? **Implement payload size monitoring with thresholds**
+? **Use structured logging with environment context**
+
+---
+
+## Support & Troubleshooting:
+
+### Common Issues:
+1. **Exchange not found**: Check FullExchangeName configuration
+2. **Messages not routing**: Verify routing key patterns match consumer bindings
+3. **Naming validation errors**: Review regex patterns and test data
+4. **Environment isolation**: Ensure each environment uses unique exchange names
+5. **Configuration validation fails**: Check required Environment property is set
+
+### Debugging Commands:
+```bash
+# Check exchange configuration
+rabbitmqctl list_exchanges
+
+# Verify routing keys
+rabbitmqctl list_bindings
+
+# Monitor message flow
+rabbitmqctl list_queues
+
+# Check environment-specific exchanges
+rabbitmqctl list_exchanges | grep "klim.events"
+```
+
+### Configuration Examples:
+```json
+{
+  "RabbitMQ": {
+    "Host": "rabbitmq.company.com",
+    "Username": "service-account",
+    "Password": "secure-password",
+    "ExchangeName": "klim.events",
+    "Environment": "prod",
+    "RoutingKeyPrefix": "klim.events",
+    "DataChangeRoutingKeyTemplate": "{prefix}.{entity}.{operation}.{version}",
+    "DomainNotificationRoutingKey": "{prefix}.domain.notification.v1",
+    "DeadLetterSuffix": "dlq"
+  }
+}
+```
+
+---
+
+## Real-World Results from KLIM.Events:
+
+### **Exchange Names Generated:**
+- Development: `klim.events.dev`
+- Staging: `klim.events.staging`
+- Production: `klim.events.prod`
+
+### **Routing Keys Generated:**
+- Data Changes: `klim.events.issuer.created.v1`, `klim.events.deal.updated.v1`
+- Domain Events: `klim.events.domain.notification.v1`
+- Dead Letters: `klim.events.prod.dlq`
+
+### **Headers Added:**
+- Environment isolation: `environment=prod`
+- Payload monitoring: `payload_size_bytes=2048`
+- Entity context: `entity_type=issuer`, `entity_id=guid`
+- Correlation tracking: `correlation_id=guid`
+
+---
+
+This document provides comprehensive naming principles for MassTransit/RabbitMQ solutions.
+Follow these conventions to ensure consistency, maintainability, and clarity across
+your messaging infrastructure.
+
+**Based on real-world implementation from KLIM.Events production service.**
+
+Last Updated: 2025-01-26
+Version: 2.0 (Updated with KLIM.Events Implementation)

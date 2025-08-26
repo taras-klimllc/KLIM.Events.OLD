@@ -60,8 +60,9 @@ public sealed class MessagePublisher
         }
 
         var headers = ParseHeaders(message.Headers);
-        var exchange = _rabbitOptions.ExchangeName;
-        var routingKey = GetKlimStandardRoutingKey(messageType, messageObj);
+        // Use environment-aware full exchange name
+        var exchange = _rabbitOptions.FullExchangeName;
+        var routingKey = GetStandardRoutingKey(messageType, messageObj);
 
         _logger.LogDebug("Publishing message {Id} to exchange {Exchange} with routing key {RoutingKey} (size: {PayloadSize}KB)",
             message.Id, exchange, routingKey, payloadSizeBytes / 1024);
@@ -78,6 +79,8 @@ public sealed class MessagePublisher
             ctx.Headers.Set("correlation_id", message.Id.ToString());
             ctx.Headers.Set("timestamp_utc", DateTime.UtcNow.ToString("O"));
             ctx.Headers.Set("payload_size_bytes", payloadSizeBytes.ToString());
+            ctx.Headers.Set("environment", _rabbitOptions.Environment);
+            ctx.Headers.Set("exchange", exchange);
 
             // Add entity-specific headers for DataChangedV1
             if (messageObj is DataChangedV1 dataChange)
@@ -111,19 +114,20 @@ public sealed class MessagePublisher
     }
 
     /// <summary>
-    /// KLIM Standard: Generate routing keys following klim.events.{entity}.{operation}.{version} pattern
+    /// KLIM Standard: Generate routing keys using centralized configuration templates
+    /// Leverages RabbitMQOptions helper methods for consistent naming
     /// </summary>
-    private string GetKlimStandardRoutingKey(Type messageType, object messageObj)
+    private string GetStandardRoutingKey(Type messageType, object messageObj)
     {
         return messageType switch
         {
             var t when t == typeof(DataChangedV1) && messageObj is DataChangedV1 dataChange =>
-                $"klim.events.{dataChange.EntityType.ToLowerInvariant()}.{dataChange.Operation.ToLowerInvariant()}.v1",
+                _rabbitOptions.GetDataChangeRoutingKey(dataChange.EntityType, dataChange.Operation),
 
             var t when t == typeof(DomainChangeNotification) =>
-                "klim.events.domain.notification.v1",
+                _rabbitOptions.GetDomainNotificationRoutingKey(),
 
-            _ => $"klim.events.{messageType.Name.ToLowerInvariant()}.v1"
+            _ => $"{_rabbitOptions.RoutingKeyPrefix}.{messageType.Name.ToLowerInvariant()}.v1"
         };
     }
 
@@ -205,7 +209,9 @@ public sealed class MessagePublisher
                 ["MessageId"] = messageId,
                 ["PayloadSizeBytes"] = payloadSizeBytes,
                 ["PayloadSizeKB"] = payloadSizeBytes / 1024,
-                ["PayloadSizeMB"] = payloadSizeBytes / (1024.0 * 1024.0)
+                ["PayloadSizeMB"] = payloadSizeBytes / (1024.0 * 1024.0),
+                ["Environment"] = _rabbitOptions.Environment,
+                ["Exchange"] = _rabbitOptions.FullExchangeName
             });
 
             _logger.LogWarning("Large payload detected: {PayloadSize}KB for message {MessageId} (threshold: {Threshold}KB)",
