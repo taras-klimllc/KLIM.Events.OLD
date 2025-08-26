@@ -69,7 +69,7 @@ builder.Services.AddMassTransit(x =>
             h.Password(mq.Password);
         });
 
-        // KLIM Standard: Configure messages to use environment-aware domain exchange
+        // KLIM Standard: Configure messages to use domain exchange
         cfg.Message<DataChangedV1>(m => m.SetEntityName(mq.FullExchangeName));
         cfg.Message<DomainChangeNotification>(m => m.SetEntityName(mq.FullExchangeName));
 
@@ -135,14 +135,6 @@ public sealed class RabbitMQOptions
     public string ExchangeName { get; init; } = "klim.events";
     
     /// <summary>
-    /// Environment identifier for multi-environment deployments
-    /// Examples: "dev", "staging", "prod"
-    /// </summary>
-    [Required]
-    [RegularExpression(@"^[a-z]+$", ErrorMessage = "Environment must be lowercase letters only")]
-    public string Environment { get; init; } = "dev";
-    
-    /// <summary>
     /// Routing key prefix following {company}.{domain} pattern
     /// Used as base for all message routing keys
     /// </summary>
@@ -165,23 +157,23 @@ public sealed class RabbitMQOptions
     
     /// <summary>
     /// Dead letter exchange suffix for failed message handling
-    /// Results in: "{FullExchangeName}.dlq"
+    /// Results in: "{ExchangeName}.dlq"
     /// </summary>
     public string DeadLetterSuffix { get; init; } = "dlq";
     
     /// <summary>
-    /// Environment-aware full exchange name
-    /// Pattern: {ExchangeName}.{Environment}
-    /// Examples: "klim.events.dev", "klim.events.prod"
+    /// Full exchange name without environment suffix
+    /// Pattern: {ExchangeName}
+    /// Example: "klim.events"
     /// </summary>
-    public string FullExchangeName => $"{ExchangeName}.{Environment}";
+    public string FullExchangeName => ExchangeName;
     
     /// <summary>
     /// Dead letter exchange name for failed messages
-    /// Pattern: {FullExchangeName}.{DeadLetterSuffix}
-    /// Example: "klim.events.prod.dlq"
+    /// Pattern: {ExchangeName}.{DeadLetterSuffix}
+    /// Example: "klim.events.dlq"
     /// </summary>
-    public string DeadLetterExchangeName => $"{FullExchangeName}.{DeadLetterSuffix}";
+    public string DeadLetterExchangeName => $"{ExchangeName}.{DeadLetterSuffix}";
     
     /// <summary>
     /// Generates a routing key for data change events

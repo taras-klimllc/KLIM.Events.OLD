@@ -60,7 +60,7 @@ public sealed class MessagePublisher
         }
 
         var headers = ParseHeaders(message.Headers);
-        // Use environment-aware full exchange name
+        // Use full exchange name without environment suffix
         var exchange = _rabbitOptions.FullExchangeName;
         var routingKey = GetStandardRoutingKey(messageType, messageObj);
 
@@ -79,7 +79,6 @@ public sealed class MessagePublisher
             ctx.Headers.Set("correlation_id", message.Id.ToString());
             ctx.Headers.Set("timestamp_utc", DateTime.UtcNow.ToString("O"));
             ctx.Headers.Set("payload_size_bytes", payloadSizeBytes.ToString());
-            ctx.Headers.Set("environment", _rabbitOptions.Environment);
             ctx.Headers.Set("exchange", exchange);
 
             // Add entity-specific headers for DataChangedV1
@@ -210,7 +209,6 @@ public sealed class MessagePublisher
                 ["PayloadSizeBytes"] = payloadSizeBytes,
                 ["PayloadSizeKB"] = payloadSizeBytes / 1024,
                 ["PayloadSizeMB"] = payloadSizeBytes / (1024.0 * 1024.0),
-                ["Environment"] = _rabbitOptions.Environment,
                 ["Exchange"] = _rabbitOptions.FullExchangeName
             });
 
