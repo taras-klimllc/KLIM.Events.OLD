@@ -123,9 +123,6 @@ public sealed class MessagePublisher
             var t when t == typeof(DomainChangeNotification) =>
                 "klim.events.domain.notification.v1",
 
-            var t when t == typeof(DataChangeProcessed) =>
-                "klim.events.processing.completed.v1",
-
             _ => $"klim.events.{messageType.Name.ToLowerInvariant()}.v1"
         };
     }
@@ -257,8 +254,6 @@ public sealed class MessagePublisher
                 return typeof(DataChangedV1);
             case "DomainChangeNotification":
                 return typeof(KLIM.Events.Service.Infrastructure.ChangeTracking.DomainChangeNotification);
-            case "DataChangeProcessed":
-                return typeof(DataChangeProcessed);
             default:
                 // Fallback to Type.GetType for fully qualified names or other types
                 return Type.GetType(typeName);

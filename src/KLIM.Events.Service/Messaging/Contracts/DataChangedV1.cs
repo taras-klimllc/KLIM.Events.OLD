@@ -28,19 +28,3 @@ public sealed record DataChangedV1(
     Dictionary<string, object?>? PostImage,
     Guid? CorrelationId = null
 );
-
-/// <summary>
-/// Downstream simplified data change notification published after processing DataChangedV1.
-/// Contains essential change information for downstream consumers.
-/// </summary>
-public sealed record DataChangeProcessed(
-    Guid EntityId,
-    string EntityType,
-    string DisplayName,
-    long ChangeVersion,
-    DateTimeOffset ChangedAt,
-    string Operation,
-    string ChangeSource,
-    string[] Fields,
-    DateTimeOffset ProcessedAt,
-    int DeliveryCount);

@@ -1,4 +1,3 @@
-﻿using KLIM.Events.Logging;
 using KLIM.Events.Messaging.Contracts;
 using KLIM.Events.Service.Infrastructure.ChangeTracking;
 using KLIM.Events.Service.Infrastructure.HealthChecks;
@@ -13,7 +12,6 @@ var builder = Host.CreateApplicationBuilder(args);
 Log.Logger = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
-    // Removed explicit .WriteTo.Console() to prevent duplicate console entries (console sink already in appsettings.json)
     .CreateLogger();
 
 builder.Logging.ClearProviders();
@@ -52,12 +50,11 @@ builder.Services.AddSingleton<IChangeEventProjector, IssuerProjector>();
 builder.Services.AddSingleton<IChangeEventProjector, DealProjector>();
 builder.Services.AddSingleton<IChangeEventProjector, GenericDomainChangeProjector>();
 
-// MassTransit - KLIM Standards Compliant Configuration
+// MassTransit - Publisher-Only Configuration
 builder.Services.AddMassTransit(x =>
 {
     x.SetKebabCaseEndpointNameFormatter();
-    // Publishing only (no consumer endpoint registered here)
-
+    
     x.UsingRabbitMq((context, cfg) =>
     {
         var mq = context.GetRequiredService<IOptions<RabbitMQOptions>>().Value;
@@ -68,32 +65,13 @@ builder.Services.AddMassTransit(x =>
             h.Password(mq.Password);
         });
 
-        cfg.UseConsumeFilter(typeof(CorrelationConsumeFilter<>), context);
-        cfg.UseMessageRetry(r =>
-        {
-            r.Immediate(3);
-            r.Exponential(5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(5));
-            r.Ignore<ArgumentException>();
-        });
-
         // KLIM Standard: Configure messages to use shared domain exchange
         cfg.Message<DataChangedV1>(m => m.SetEntityName(mq.ExchangeName));
         cfg.Message<DomainChangeNotification>(m => m.SetEntityName(mq.ExchangeName));
-        cfg.Message<DataChangeProcessed>(m => m.SetEntityName(mq.ExchangeName));
 
         // KLIM Standard: Configure as topic exchange
-        cfg.Publish<DataChangedV1>(p =>
-        {
-            p.ExchangeType = "topic";
-        });
-        cfg.Publish<DomainChangeNotification>(p =>
-        {
-            p.ExchangeType = "topic";
-        });
-        cfg.Publish<DataChangeProcessed>(p =>
-        {
-            p.ExchangeType = "topic";
-        });
+        cfg.Publish<DataChangedV1>(p => p.ExchangeType = "topic");
+        cfg.Publish<DomainChangeNotification>(p => p.ExchangeType = "topic");
     });
 });
 
@@ -132,8 +110,8 @@ public sealed class RabbitMQOptions
     public string Host { get; init; } = "localhost";
     public string Username { get; init; } = "guest";
     public string Password { get; init; } = "guest";
-    public string ExchangeName { get; init; } = "klim.events"; // ✅ CLEAN: Simple and direct
-    public string RoutingKeyPrefix { get; init; } = "klim.events"; // ✅ CONSISTENT: Same clean pattern
+    public string ExchangeName { get; init; } = "klim.events";
+    public string RoutingKeyPrefix { get; init; } = "klim.events";
 }
 
 public sealed class DatabaseOptions
