@@ -1,5 +1,4 @@
 using Microsoft.Data.SqlClient;
-using System.Diagnostics;
 
 namespace KLIM.Events.Service.Infrastructure.Outbox;
 
@@ -98,7 +97,7 @@ END CATCH";
 
         var messages = new List<OutboxMessage>();
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        
+
         while (await reader.ReadAsync(cancellationToken))
         {
             messages.Add(new OutboxMessage(
@@ -139,7 +138,7 @@ END CATCH";
     private async Task<SqlConnection> CreateConnectionAsync(string connectionString, bool useAzureAd, CancellationToken cancellationToken)
     {
         var conn = new SqlConnection(connectionString);
-        
+
         // Check if connection string already has Azure AD authentication configured
         var csBuilder = new SqlConnectionStringBuilder(connectionString);
         var hasAzureAdAuth = csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDefault ||
@@ -148,13 +147,13 @@ END CATCH";
                             csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryManagedIdentity ||
                             csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryServicePrincipal ||
                             csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow;
-        
+
         // Only set AccessToken if using Azure AD but connection string doesn't already specify Azure AD authentication
         if (useAzureAd && !hasAzureAdAuth)
         {
             conn.AccessToken = await _authService.AcquireTokenAsync(cancellationToken);
         }
-        
+
         return conn;
     }
 }

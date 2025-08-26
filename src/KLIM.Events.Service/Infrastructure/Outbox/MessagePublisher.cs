@@ -54,7 +54,7 @@ public sealed class MessagePublisher
 
         if (payloadSizeBytes > MAX_PAYLOAD_SIZE_BYTES)
         {
-            _logger.LogError("Payload too large: {PayloadSize}KB for message {Id}, max allowed: {MaxSize}KB", 
+            _logger.LogError("Payload too large: {PayloadSize}KB for message {Id}, max allowed: {MaxSize}KB",
                 payloadSizeBytes / 1024, message.Id, MAX_PAYLOAD_SIZE_BYTES / 1024);
             return PublishResult.Failed($"Payload too large: {payloadSizeBytes / 1024}KB");
         }
@@ -63,7 +63,7 @@ public sealed class MessagePublisher
         var exchange = _rabbitOptions.ExchangeName;
         var routingKey = GetKlimStandardRoutingKey(messageType, messageObj);
 
-        _logger.LogDebug("Publishing message {Id} to exchange {Exchange} with routing key {RoutingKey} (size: {PayloadSize}KB)", 
+        _logger.LogDebug("Publishing message {Id} to exchange {Exchange} with routing key {RoutingKey} (size: {PayloadSize}KB)",
             message.Id, exchange, routingKey, payloadSizeBytes / 1024);
 
         // KLIM Standard: Publish with proper routing key and headers
@@ -71,14 +71,14 @@ public sealed class MessagePublisher
         {
             // Set KLIM standard routing key
             ctx.SetRoutingKey(routingKey);
-            
+
             // KLIM Standard: Set standard headers
             ctx.Headers.Set("source", "events.service");
             ctx.Headers.Set("version", GetMessageVersion(messageType));
             ctx.Headers.Set("correlation_id", message.Id.ToString());
             ctx.Headers.Set("timestamp_utc", DateTime.UtcNow.ToString("O"));
             ctx.Headers.Set("payload_size_bytes", payloadSizeBytes.ToString());
-            
+
             // Add entity-specific headers for DataChangedV1
             if (messageObj is DataChangedV1 dataChange)
             {
@@ -86,24 +86,24 @@ public sealed class MessagePublisher
                 ctx.Headers.Set("entity_type", dataChange.EntityType.ToLowerInvariant());
                 ctx.Headers.Set("entity_id", dataChange.EntityId.ToString());
             }
-            
+
             // Add custom headers from message
             if (headers != null)
             {
                 foreach (var header in headers)
                     ctx.Headers.Set(header.Key, header.Value);
             }
-            
+
             // MassTransit standard headers
             ctx.MessageId = message.Id;
             ctx.Headers.Set("OccurredAt", message.OccurredAt.ToString("O"));
             ctx.Headers.Set("PayloadSizeKB", (payloadSizeBytes / 1024).ToString());
-            
+
         }, cancellationToken);
 
         // Log our own clean message publishing event with short type name
         var shortTypeName = GetShortTypeName(messageType);
-        _logger.LogInformation("PUBLISHED {MessageType} {MessageId} -> {Exchange}/{RoutingKey} ({PayloadSize}KB)", 
+        _logger.LogInformation("PUBLISHED {MessageType} {MessageId} -> {Exchange}/{RoutingKey} ({PayloadSize}KB)",
             shortTypeName, message.Id, exchange, routingKey, payloadSizeBytes / 1024);
 
         var changeDetails = ExtractChangeDetails(messageObj);
@@ -119,13 +119,13 @@ public sealed class MessagePublisher
         {
             var t when t == typeof(DataChangedV1) && messageObj is DataChangedV1 dataChange =>
                 $"klim.events.{dataChange.EntityType.ToLowerInvariant()}.{dataChange.Operation.ToLowerInvariant()}.v1",
-            
+
             var t when t == typeof(DomainChangeNotification) =>
                 "klim.events.domain.notification.v1",
-            
+
             var t when t == typeof(DataChangeProcessed) =>
                 "klim.events.processing.completed.v1",
-            
+
             _ => $"klim.events.{messageType.Name.ToLowerInvariant()}.v1"
         };
     }
@@ -188,13 +188,13 @@ public sealed class MessagePublisher
 
         var fieldCount = image.Count;
         var summary = $"{prefix}[{string.Join(", ", details)}]";
-        
+
         // Show how many more fields are available
         if (fieldCount > 8)
         {
             summary += $" +{fieldCount - 8} more fields";
         }
-        
+
         return summary;
     }
 
@@ -211,12 +211,12 @@ public sealed class MessagePublisher
                 ["PayloadSizeMB"] = payloadSizeBytes / (1024.0 * 1024.0)
             });
 
-            _logger.LogWarning("Large payload detected: {PayloadSize}KB for message {MessageId} (threshold: {Threshold}KB)", 
+            _logger.LogWarning("Large payload detected: {PayloadSize}KB for message {MessageId} (threshold: {Threshold}KB)",
                 payloadSizeBytes / 1024, messageId, LARGE_PAYLOAD_THRESHOLD / 1024);
         }
         else
         {
-            _logger.LogDebug("Payload size: {PayloadSize}KB for message {MessageId}", 
+            _logger.LogDebug("Payload size: {PayloadSize}KB for message {MessageId}",
                 payloadSizeBytes / 1024, messageId);
         }
     }
@@ -225,7 +225,7 @@ public sealed class MessagePublisher
     public static Dictionary<string, object?> SanitizePayloadData(Dictionary<string, object?> data)
     {
         var sanitized = new Dictionary<string, object?>(data.Count);
-        
+
         foreach (var kvp in data)
         {
             var value = kvp.Value;
@@ -241,7 +241,7 @@ public sealed class MessagePublisher
                 sanitized[kvp.Key] = value;
             }
         }
-        
+
         return sanitized;
     }
 

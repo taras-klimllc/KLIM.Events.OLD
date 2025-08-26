@@ -14,7 +14,7 @@ public sealed class SqlAuthenticationService
     {
         var credential = new DefaultAzureCredential();
         var token = await credential.GetTokenAsync(
-            new TokenRequestContext(new[] { AZURE_SQL_SCOPE }), 
+            new TokenRequestContext(new[] { AZURE_SQL_SCOPE }),
             cancellationToken);
         return token.Token;
     }

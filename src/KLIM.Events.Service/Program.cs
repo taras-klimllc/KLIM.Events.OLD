@@ -1,13 +1,11 @@
 ﻿using KLIM.Events.Logging;
-using KLIM.Events.Messaging.Consumers;
 using KLIM.Events.Messaging.Contracts;
-using KLIM.Events.Service.Infrastructure.Outbox;
 using KLIM.Events.Service.Infrastructure.ChangeTracking;
 using KLIM.Events.Service.Infrastructure.HealthChecks;
+using KLIM.Events.Service.Infrastructure.Outbox;
 using MassTransit;
 using Microsoft.Extensions.Options;
 using Serilog;
-using static KLIM.Events.Service.Infrastructure.ChangeTracking.GenericDomainChangeProjector;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -19,14 +17,14 @@ Log.Logger = new LoggerConfiguration()
     .CreateLogger();
 
 builder.Logging.ClearProviders();
-builder.Services.AddLogging(lb => 
+builder.Services.AddLogging(lb =>
 {
     lb.AddSerilog();
     // Add a filter to suppress MassTransit SENT messages
     lb.AddFilter("MassTransit", LogLevel.Warning);
     lb.AddFilter("MassTransit.RabbitMqTransport", LogLevel.Error);
     lb.AddFilter("MassTransit.Transports", LogLevel.Error);
-    lb.AddFilter((category, level) => 
+    lb.AddFilter((category, level) =>
     {
         // Filter out any log message that contains these patterns
         if (category?.StartsWith("MassTransit") == true && level == LogLevel.Information)
@@ -63,11 +61,11 @@ builder.Services.AddMassTransit(x =>
     x.UsingRabbitMq((context, cfg) =>
     {
         var mq = context.GetRequiredService<IOptions<RabbitMQOptions>>().Value;
-        
-        cfg.Host(mq.Host, h => 
-        { 
-            h.Username(mq.Username); 
-            h.Password(mq.Password); 
+
+        cfg.Host(mq.Host, h =>
+        {
+            h.Username(mq.Username);
+            h.Password(mq.Password);
         });
 
         cfg.UseConsumeFilter(typeof(CorrelationConsumeFilter<>), context);
@@ -84,14 +82,17 @@ builder.Services.AddMassTransit(x =>
         cfg.Message<DataChangeProcessed>(m => m.SetEntityName(mq.ExchangeName));
 
         // KLIM Standard: Configure as topic exchange
-        cfg.Publish<DataChangedV1>(p => { 
-            p.ExchangeType = "topic"; 
+        cfg.Publish<DataChangedV1>(p =>
+        {
+            p.ExchangeType = "topic";
         });
-        cfg.Publish<DomainChangeNotification>(p => { 
-            p.ExchangeType = "topic"; 
+        cfg.Publish<DomainChangeNotification>(p =>
+        {
+            p.ExchangeType = "topic";
         });
-        cfg.Publish<DataChangeProcessed>(p => { 
-            p.ExchangeType = "topic"; 
+        cfg.Publish<DataChangeProcessed>(p =>
+        {
+            p.ExchangeType = "topic";
         });
     });
 });

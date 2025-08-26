@@ -55,7 +55,7 @@ public sealed class DataChangedConsumer : IConsumer<DataChangedV1>
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "Error processing {EntityType} {EntityId} Op={Op} Display={DisplayName}", 
+            _log.LogError(ex, "Error processing {EntityType} {EntityId} Op={Op} Display={DisplayName}",
                 msg.EntityType, msg.EntityId, msg.Operation, msg.DisplayName);
             throw;
         }

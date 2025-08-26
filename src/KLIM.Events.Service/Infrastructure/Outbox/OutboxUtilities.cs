@@ -36,7 +36,7 @@ public sealed class CleanupScheduler
 {
     private DateTime _lastCleanup = DateTime.MinValue;
 
-    public bool ShouldCleanup(double intervalHours) => 
+    public bool ShouldCleanup(double intervalHours) =>
         (DateTime.UtcNow - _lastCleanup).TotalHours >= intervalHours;
 
     public void MarkCleaned() => _lastCleanup = DateTime.UtcNow;
@@ -47,11 +47,11 @@ public sealed class CleanupScheduler
 /// </summary>
 public static class SqlExceptionHelper
 {
-    private static readonly int[] TransientErrorNumbers = 
+    private static readonly int[] TransientErrorNumbers =
     {
         -2, 4060, 40197, 40501, 40613, 49918, 49919, 49920, 10928, 10929, 1205, 233, 18456
     };
 
-    public static bool IsTransient(Microsoft.Data.SqlClient.SqlException ex) => 
+    public static bool IsTransient(Microsoft.Data.SqlClient.SqlException ex) =>
         TransientErrorNumbers.Contains(ex.Number);
 }

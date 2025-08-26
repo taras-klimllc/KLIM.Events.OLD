@@ -34,7 +34,7 @@ public static class OutboxLoggerExtensions
         string displayName = "")
     {
         var friendlyTypeName = GetFriendlyTypeName(messageType);
-        
+
         using (logger.BeginScope(new Dictionary<string, object>
         {
             ["MessageId"] = messageId,
@@ -68,7 +68,7 @@ public static class OutboxLoggerExtensions
         string sourceId)
     {
         var friendlyTypeName = GetFriendlyTypeName(messageType);
-        
+
         using (logger.BeginScope(new Dictionary<string, object>
         {
             ["MessageId"] = messageId,

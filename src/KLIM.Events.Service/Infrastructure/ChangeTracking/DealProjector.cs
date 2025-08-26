@@ -75,13 +75,13 @@ public sealed class DealProjector : IChangeEventProjector
         // Standard audit fields
         "CreatedBy", "Created", "LastUpdatedBy", "LastUpdated"
     };
-    
+
     // Audit field prefixes for dynamic columns (e.g., MSSQL_DroppedLedgerColumn_*)
-    private static readonly string[] AuditFieldPrefixes = 
+    private static readonly string[] AuditFieldPrefixes =
     {
         "MSSQL_DroppedLedgerColumn_"
     };
-    
+
     /// <summary>
     /// Determines if a field should be considered an audit field and excluded from business change tracking
     /// </summary>
@@ -90,7 +90,7 @@ public sealed class DealProjector : IChangeEventProjector
         // Check exact matches first (faster)
         if (AuditFields.Contains(fieldName))
             return true;
-            
+
         // Check prefix matches for dynamic columns
         return AuditFieldPrefixes.Any(prefix => fieldName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
     }
@@ -100,22 +100,22 @@ public sealed class DealProjector : IChangeEventProjector
     public async Task<IEnumerable<OutboxInsert>> ProjectAsync(SqlConnection connection, SqlTransaction tx, ChangeTrackingPollingService.TableChangeBatch batch, CancellationToken ct)
     {
         var inserts = new List<OutboxInsert>(batch.Changes.Count);
-        
+
         foreach (var change in batch.Changes)
         {
             var op = change.Operation;
-            
+
             // Filter audit-only changes
             if (op == "U")
             {
                 var businessChangedFields = change.ChangedColumns
                     .Where(field => !IsAuditField(field))
                     .ToArray();
-                    
+
                 if (businessChangedFields.Length == 0)
                 {
                     // Log skipped audit-only changes for visibility
-                    _logger?.LogDebug("Skipping audit-only update for Deal {EntityId} (version {ChangeVersion}): [{AuditFields}]", 
+                    _logger?.LogDebug("Skipping audit-only update for Deal {EntityId} (version {ChangeVersion}): [{AuditFields}]",
                         change.Id, change.Version, string.Join(", ", change.ChangedColumns));
                     continue;
                 }
@@ -123,7 +123,7 @@ public sealed class DealProjector : IChangeEventProjector
                 {
                     // Mixed business + audit changes - log for awareness
                     var auditOnlyFields = change.ChangedColumns.Except(businessChangedFields).ToArray();
-                    _logger?.LogDebug("Processing mixed update for Deal {EntityId}: Business[{BusinessFields}] + Audit[{AuditFields}]", 
+                    _logger?.LogDebug("Processing mixed update for Deal {EntityId}: Business[{BusinessFields}] + Audit[{AuditFields}]",
                         change.Id, string.Join(", ", businessChangedFields), string.Join(", ", auditOnlyFields));
                 }
             }
@@ -229,14 +229,14 @@ public sealed class DealProjector : IChangeEventProjector
             {
                 var guid = rdr.GetGuid(0); // RowGUID is first column
                 var data = new Dictionary<string, object?>();
-                
+
                 // Extract all columns dynamically
                 for (int i = 0; i < rdr.FieldCount; i++)
                 {
                     var fieldName = rdr.GetName(i);
                     data[fieldName] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
                 }
-                
+
                 // Apply payload sanitization for large text fields
                 var sanitizedData = MessagePublisher.SanitizePayloadData(data);
                 return (guid, sanitizedData);
@@ -248,14 +248,14 @@ public sealed class DealProjector : IChangeEventProjector
             using var scope = _logger?.BeginScope(new Dictionary<string, object> { ["PrimaryKey"] = pk.ToString() ?? "null", ["Operation"] = "LoadCurrent" });
             _logger?.LogWarning(ex, "Failed to load current data for Deal {PrimaryKey}, using fallback", pk);
         }
-        
+
         return null;
     }
 
     private async Task<List<HistRow>> LoadHistoryWindowAsync(SqlConnection conn, SqlTransaction tx, object pk, CancellationToken ct)
     {
         var list = new List<HistRow>();
-        
+
         try
         {
             await using var cmd = new SqlCommand(SQL_DEAL_HISTORY_WINDOW, conn, tx);
@@ -265,7 +265,7 @@ public sealed class DealProjector : IChangeEventProjector
             {
                 var guid = rdr.GetGuid(0); // RowGUID is first column
                 var data = new Dictionary<string, object?>();
-                
+
                 for (int i = 0; i < rdr.FieldCount; i++)
                 {
                     var fieldName = rdr.GetName(i);
@@ -274,7 +274,7 @@ public sealed class DealProjector : IChangeEventProjector
                         data[fieldName] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
                     }
                 }
-                
+
                 // Apply payload sanitization for large text fields
                 var sanitizedData = MessagePublisher.SanitizePayloadData(data);
                 list.Add(new HistRow(guid, sanitizedData));
@@ -286,7 +286,7 @@ public sealed class DealProjector : IChangeEventProjector
             using var scope = _logger?.BeginScope(new Dictionary<string, object> { ["PrimaryKey"] = pk.ToString() ?? "null", ["Operation"] = "LoadHistory" });
             _logger?.LogWarning(ex, "Failed to load complete history for Deal {PrimaryKey}, using partial data (count: {Count})", pk, list.Count);
         }
-        
+
         return list;
     }
 
@@ -297,9 +297,9 @@ public sealed class DealProjector : IChangeEventProjector
         var shortName = data.GetValueOrDefault("ShortName")?.ToString();
         var dealSize = data.GetValueOrDefault("KLDealSize");
         var stage = data.GetValueOrDefault("Stage")?.ToString();
-        
+
         var displayName = shortName ?? name ?? "Unknown Deal";
-        
+
         // Add size and stage info if available
         var details = new List<string>();
         if (dealSize != null && decimal.TryParse(dealSize.ToString(), out var size) && size > 0)
@@ -310,12 +310,12 @@ public sealed class DealProjector : IChangeEventProjector
         {
             details.Add(stage);
         }
-        
+
         if (details.Count > 0)
         {
             displayName += $" ({string.Join(", ", details)})";
         }
-        
+
         return displayName;
     }
 

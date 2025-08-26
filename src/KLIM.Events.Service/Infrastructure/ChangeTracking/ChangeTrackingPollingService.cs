@@ -206,7 +206,7 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
     private async Task<string[]> DecodeChangedColumnsAsync(SqlConnection conn, TrackedTable table, byte[]? mask, CancellationToken ct)
     {
         if (mask == null || mask.Length == 0) return Array.Empty<string>();
-        
+
         const string COL_SQL = @"SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(@obj) ORDER BY column_id";
         var cacheKey = $"{table.Schema}.{table.Name}";
         if (!_columnCache.TryGetValue(cacheKey, out var cols))
@@ -222,21 +222,21 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
 
         // SQL Server Change Tracking stores column IDs as 4-byte integers
         var changed = new List<string>();
-        
+
         for (int i = 0; i < mask.Length; i += 4)
         {
             if (i + 3 >= mask.Length) break;
-            
+
             // Read 4-byte integer (little-endian)
             int columnId = BitConverter.ToInt32(mask, i);
-            
+
             // Column IDs are 1-based, our array is 0-based
             if (columnId > 0 && columnId <= cols.Length)
             {
                 changed.Add(cols[columnId - 1]);
             }
         }
-            
+
         return changed.ToArray();
     }
 
@@ -253,7 +253,7 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
     private SqlConnection CreateConnection(string connectionString, bool useAzureAd, CancellationToken ct)
     {
         var conn = new SqlConnection(connectionString);
-        
+
         // Check if connection string already has Azure AD authentication configured
         var csBuilder = new SqlConnectionStringBuilder(connectionString);
         var hasAzureAdAuth = csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDefault ||
@@ -262,13 +262,13 @@ OFFSET 0 ROWS FETCH NEXT @batchSize ROWS ONLY;";
                             csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryManagedIdentity ||
                             csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryServicePrincipal ||
                             csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow;
-        
+
         // Only set AccessToken if using Azure AD but connection string doesn't already specify Azure AD authentication
         if (useAzureAd && !hasAzureAdAuth)
         {
             conn.AccessToken = AcquireAzureAdToken(ct);
         }
-        
+
         return conn;
     }
 

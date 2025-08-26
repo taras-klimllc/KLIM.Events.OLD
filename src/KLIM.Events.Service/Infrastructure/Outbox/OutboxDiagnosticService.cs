@@ -32,7 +32,7 @@ public sealed class OutboxDiagnosticService : BackgroundService
     {
         // Run diagnostics once on startup, then every 5 minutes
         await RunDiagnosticsAsync();
-        
+
         using var timer = new PeriodicTimer(TimeSpan.FromMinutes(5));
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -62,7 +62,7 @@ public sealed class OutboxDiagnosticService : BackgroundService
             connectionString = _authService.SanitizeConnectionString(connectionString, useAzureAd);
 
             await using var connection = new SqlConnection(connectionString);
-            
+
             // Check if connection string already has Azure AD authentication configured
             var csBuilder = new SqlConnectionStringBuilder(connectionString);
             var hasAzureAdAuth = csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDefault ||
@@ -71,7 +71,7 @@ public sealed class OutboxDiagnosticService : BackgroundService
                                 csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryManagedIdentity ||
                                 csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryServicePrincipal ||
                                 csBuilder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow;
-            
+
             // Only set AccessToken if using Azure AD but connection string doesn't already specify Azure AD authentication
             if (useAzureAd && !hasAzureAdAuth)
             {
