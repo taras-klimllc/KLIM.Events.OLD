@@ -1,0 +1,35 @@
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Build Output
+bin/
+obj/
+out/
+target/
+
+# Environment Configuration
+.env
+.env.local
+.env.production
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Application
+appsettings.Development.json
+appsettings.Local.json

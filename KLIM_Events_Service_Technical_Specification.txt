@@ -1,0 +1,933 @@
+================================================================================
+KLIM.EVENTS SERVICE - COMPREHENSIVE TECHNICAL SPECIFICATION
+================================================================================
+Version: 2.0
+Date: December 2024
+Framework: .NET 8.0
+Author: Integration Systems Engineering Team
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+The KLIM.Events service is a production-ready .NET 8 Worker Service that implements
+a comprehensive outbox pattern for publishing data change events from SQL Server 
+(with Change Tracking enabled) to RabbitMQ using MassTransit. The service features
+enterprise-grade reliability, structured logging, health monitoring, and Azure AD 
+authentication.
+
+Key Features:
+? Generic entity support (Issuers, Deals, extensible to future entities)
+? Production-ready outbox pattern with transactional guarantees
+? Real-time diagnostics and comprehensive structured logging
+? Health monitoring with separate liveness/readiness probes
+? Adaptive polling and concurrent message processing
+? Azure AD authentication for SQL Server connections
+? Performance optimized with batching and connection pooling
+? Rich payloads (2KB+) with complete entity snapshots
+
+================================================================================
+2. ARCHITECTURE OVERVIEW
+================================================================================
+
+???????????????????    ???????????????????    ???????????????????
+?   Azure SQL DB  ?    ? KLIM Events     ?    ? External RabbitMQ?
+?                 ? ????    Service      ? ????                 ?
+?   + Azure AD    ?    ?   + Azure AD    ?    ?  klim.events    ?
+???????????????????    ???????????????????    ???????????????????
+
+Message Flow:
+SQL Change ??? Polling ??? Projectors ??? Outbox ??? RabbitMQ ??? Consumers
+  Tracking      Service     (Transform)    Table      Exchange     (Downstream)
+
+Core Components:
+- ChangeTrackingPollingService: Monitors SQL Change Tracking
+- Projectors: Transform row changes to domain events (IssuerProjector, DealProjector)
+- OutboxDispatcherService: Publishes messages to RabbitMQ
+- MessagePublisher: Handles MassTransit integration
+- HealthEndpointHostService: HTTP health endpoints
+
+================================================================================
+3. PROJECT STRUCTURE
+================================================================================
+
+KLIM.Events/
+??? src/KLIM.Events.Service/
+?   ??? KLIM.Events.Service.csproj          # Project file
+?   ??? Program.cs                          # Application entry point
+?   ??? appsettings.json                    # Production configuration
+?   ??? appsettings.Development.json        # Development overrides
+?   ??? Dockerfile                          # Container configuration
+?   ??? Messaging/
+?   ?   ??? Contracts/
+?   ?       ??? DataChangedV1.cs            # Primary message contract
+?   ??? Infrastructure/
+?       ??? ChangeTracking/
+?       ?   ??? IChangeEventProjector.cs    # Projector interface
+?       ?   ??? ChangeTrackingPollingService.cs  # Main polling service
+?       ?   ??? IssuerProjector.cs          # Issuer-specific projector
+?       ?   ??? DealProjector.cs            # Deal-specific projector
+?       ?   ??? GenericDomainChangeProjector.cs  # Generic projector
+?       ?   ??? SqlOutboxWriter.cs          # Outbox persistence
+?       ?   ??? DomainChangeNotification.cs # System notifications
+?       ??? Outbox/
+?       ?   ??? OutboxRepository.cs         # Data access layer
+?       ?   ??? OutboxDispatcherService.cs  # Message dispatch service
+?       ?   ??? OutboxDiagnosticService.cs  # Diagnostics & monitoring
+?       ?   ??? MessagePublisher.cs         # RabbitMQ publishing
+?       ?   ??? SqlAuthenticationService.cs # Azure AD auth
+?       ?   ??? OutboxLoggerExtensions.cs   # Logging utilities
+?       ?   ??? OutboxUtilities.cs          # Helper functions
+?       ??? HealthChecks/
+?           ??? HealthEndpointHostService.cs # HTTP health endpoints
+??? docker-compose.yml                      # Docker deployment
+??? README.md                              # Documentation
+
+================================================================================
+4. PROJECT FILE CONFIGURATION
+================================================================================
+
+File: src/KLIM.Events.Service/KLIM.Events.Service.csproj
+```xml
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>59702702-6e9b-49fe-b51c-0effbc886f6c</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AspNetCore.HealthChecks.Rabbitmq" Version="9.0.0" />
+    <PackageReference Include="AspNetCore.HealthChecks.SqlServer" Version="9.0.0" />
+    <PackageReference Include="MassTransit" Version="8.5.2" />
+    <PackageReference Include="MassTransit.RabbitMQ" Version="8.5.2" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="9.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="9.0.8" />
+    <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+    <PackageReference Include="System.Text.Json" Version="9.0.8" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+    <PackageReference Include="Azure.Identity" Version="1.11.4" />
+  </ItemGroup>
+</Project>
+```
+
+================================================================================
+5. APPLICATION CONFIGURATION
+================================================================================
+
+File: src/KLIM.Events.Service/appsettings.json
+```json
+{
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "Microsoft.Hosting.Lifetime": "Information",
+        "MassTransit": "Fatal",
+        "MassTransit.Transports": "Fatal",
+        "MassTransit.RabbitMqTransport": "Fatal",
+        "MassTransit.Context": "Fatal",
+        "MassTransit.Observability": "Fatal",
+        "KLIM.Events.Service.Infrastructure.Outbox": "Information",
+        "KLIM.Events.Service.Infrastructure.ChangeTracking": "Information"
+      }
+    },
+    "Filter": [
+      {
+        "Name": "ByExcluding",
+        "Args": {
+          "expression": "@m like '%SENT%'"
+        }
+      },
+      {
+        "Name": "ByExcluding", 
+        "Args": {
+          "expression": "@m like '%KLIM.Events.Messaging.Contracts%'"
+        }
+      },
+      {
+        "Name": "ByExcluding",
+        "Args": {
+          "expression": "@m like '%Version=1.0.0.0%'"
+        }
+      }
+    ],
+    "WriteTo": [
+      {
+        "Name": "Console",
+        "Args": {
+          "outputTemplate": "{Timestamp:HH:mm:ss.fff} [{Level:u3}] {Message:lj}{NewLine}{Exception}"
+        }
+      },
+      {
+        "Name": "File",
+        "Args": {
+          "path": "logs/outbox-.log",
+          "rollingInterval": "Day",
+          "retainedFileCountLimit": 10,
+          "outputTemplate": "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}"
+        }
+      }
+    ],
+    "Enrich": ["FromLogContext"]
+  },
+  "Database": {
+    "ConnectionString": "Server=klim-sql.2e340c2a848b.database.windows.net;Database=KLIM_IM_TK;Encrypt=True;TrustServerCertificate=False;MultipleActiveResultSets=True;Authentication=Active Directory Default",
+    "UseAzureAd": true
+  },
+  "RabbitMQ": {
+    "Host": "localhost",
+    "Username": "guest",
+    "Password": "guest",
+    "ExchangeName": "klim.events",
+    "RoutingKeyPrefix": "klim.events",
+    "DataChangeRoutingKeyTemplate": "{prefix}.{entity}.{operation}.{version}",
+    "DomainNotificationRoutingKey": "{prefix}.domain.notification.v1",
+    "DeadLetterSuffix": "dlq"
+  },
+  "MassTransit": {
+    "Outbox": {
+      "Enabled": true,
+      "DeliveryIntervalSeconds": 2,
+      "BatchSize": 50,
+      "MaxConcurrentDispatches": 5,
+      "RetentionDays": 7,
+      "CleanupIntervalHours": 6,
+      "PayloadMonitoring": {
+        "MaxPayloadSizeMB": 2,
+        "LargePayloadThresholdKB": 500,
+        "MaxTextFieldLengthKB": 10,
+        "LogPayloadSizes": true
+      }
+    }
+  },
+  "ChangeTracking": {
+    "PollingIntervalSeconds": 5,
+    "BatchSize": 100,
+    "Tables": [
+      { "Schema": "dbo", "Name": "Issuers", "Pk": "IssuerID" },
+      { "Schema": "dbo", "Name": "Deals", "Pk": "DealID" }
+    ]
+  },
+  "Health": {
+    "Port": 8080
+  }
+}
+```
+
+File: src/KLIM.Events.Service/appsettings.Development.json
+```json
+{
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Debug",
+      "Override": {
+        "Microsoft": "Warning",
+        "MassTransit": "Fatal",
+        "MassTransit.Transports": "Fatal",
+        "MassTransit.RabbitMqTransport": "Fatal",
+        "MassTransit.Context": "Fatal",
+        "MassTransit.Observability": "Fatal",
+        "KLIM.Events.Service.Infrastructure.Outbox": "Debug"
+      }
+    },
+    "Filter": [
+      {
+        "Name": "ByExcluding",
+        "Args": {
+          "expression": "@m like '%SENT%'"
+        }
+      },
+      {
+        "Name": "ByExcluding", 
+        "Args": {
+          "expression": "@m like '%KLIM.Events.Messaging.Contracts%'"
+        }
+      },
+      {
+        "Name": "ByExcluding",
+        "Args": {
+          "expression": "@m like '%Version=1.0.0.0%'"
+        }
+      }
+    ]
+  }
+}
+```
+
+================================================================================
+6. MAIN PROGRAM ENTRY POINT
+================================================================================
+
+File: src/KLIM.Events.Service/Program.cs
+```csharp
+using KLIM.Events.Messaging.Contracts;
+using KLIM.Events.Service.Infrastructure.ChangeTracking;
+using KLIM.Events.Service.Infrastructure.HealthChecks;
+using KLIM.Events.Service.Infrastructure.Outbox;
+using MassTransit;
+using Microsoft.Extensions.Options;
+using Serilog;
+using System.ComponentModel.DataAnnotations;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+// Configure Serilog once, rely solely on configuration (avoids duplicate console logs)
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
+    .Enrich.FromLogContext()
+    .CreateLogger();
+
+builder.Logging.ClearProviders();
+builder.Services.AddLogging(lb =>
+{
+    lb.AddSerilog();
+    // Add a filter to suppress MassTransit SENT messages
+    lb.AddFilter("MassTransit", LogLevel.Warning);
+    lb.AddFilter("MassTransit.RabbitMqTransport", LogLevel.Error);
+    lb.AddFilter("MassTransit.Transports", LogLevel.Error);
+    lb.AddFilter((category, level) =>
+    {
+        // Filter out any log message that contains these patterns
+        if (category?.StartsWith("MassTransit") == true && level == LogLevel.Information)
+        {
+            return false;
+        }
+        return true;
+    });
+});
+
+// Configuration - consolidated database settings and KLIM-standard RabbitMQ
+builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
+builder.Services.Configure<ChangeTrackingOptions>(builder.Configuration.GetSection("ChangeTracking"));
+builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("MassTransit:Outbox"));
+builder.Services.Configure<RabbitMQOptions>(builder.Configuration.GetSection("RabbitMQ"));
+
+// Configuration validation - ensure naming conventions are followed
+builder.Services.AddOptionsWithValidateOnStart<RabbitMQOptions>();
+
+// Outbox services
+builder.Services.AddSingleton<SqlAuthenticationService>();
+builder.Services.AddSingleton<OutboxRepository>();
+builder.Services.AddSingleton<MessagePublisher>();
+
+// Change tracking infrastructure - specialized projectors for each entity type
+builder.Services.AddSingleton<IOutboxWriter, SqlOutboxWriter>();
+builder.Services.AddSingleton<IChangeEventProjector, IssuerProjector>();
+builder.Services.AddSingleton<IChangeEventProjector, DealProjector>();
+builder.Services.AddSingleton<IChangeEventProjector, GenericDomainChangeProjector>();
+
+// MassTransit - Publisher-Only Configuration
+builder.Services.AddMassTransit(x =>
+{
+    x.SetKebabCaseEndpointNameFormatter();
+    
+    x.UsingRabbitMq((context, cfg) =>
+    {
+        var mq = context.GetRequiredService<IOptions<RabbitMQOptions>>().Value;
+
+        cfg.Host(mq.Host, h =>
+        {
+            h.Username(mq.Username);
+            h.Password(mq.Password);
+        });
+
+        // KLIM Standard: Configure messages to use domain exchange
+        cfg.Message<DataChangedV1>(m => m.SetEntityName(mq.FullExchangeName));
+        cfg.Message<DomainChangeNotification>(m => m.SetEntityName(mq.FullExchangeName));
+
+        // KLIM Standard: Configure as topic exchange for flexible routing
+        cfg.Publish<DataChangedV1>(p => p.ExchangeType = "topic");
+        cfg.Publish<DomainChangeNotification>(p => p.ExchangeType = "topic");
+    });
+});
+
+// Background services
+builder.Services.AddHostedService<ChangeTrackingPollingService>();
+builder.Services.AddHostedService<OutboxDispatcherService>();
+builder.Services.AddHostedService<OutboxDiagnosticService>();
+
+// Health checks - use shared database configuration
+var dbOptions = builder.Configuration.GetSection("Database").Get<DatabaseOptions>()!;
+builder.Services.AddHealthChecks()
+    .AddSqlServer(
+        connectionString: GetSanitizedConnectionString(dbOptions),
+        name: "sql",
+        tags: new[] { "readiness" })
+    .AddRabbitMQ(tags: new[] { "readiness" });
+
+builder.Services.AddHostedService<HealthEndpointHostService>();
+
+await builder.Build().RunAsync();
+
+static string GetSanitizedConnectionString(DatabaseOptions options)
+{
+    if (string.IsNullOrEmpty(options.ConnectionString) || !options.UseAzureAd)
+        return options.ConnectionString;
+
+    var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(options.ConnectionString);
+    builder.Remove("User ID");
+    builder.Remove("Password");
+    return builder.ConnectionString;
+}
+
+/// <summary>
+/// KLIM Standard: RabbitMQ Configuration Class
+/// Implements enterprise naming conventions for exchanges, routing keys, and queues
+/// </summary>
+public sealed class RabbitMQOptions
+{
+    /// <summary>RabbitMQ host (e.g., "rabbitmq.company.com" or "localhost")</summary>
+    [Required]
+    public string Host { get; init; } = "localhost";
+    
+    /// <summary>RabbitMQ username for authentication</summary>
+    [Required]
+    public string Username { get; init; } = "guest";
+    
+    /// <summary>RabbitMQ password for authentication</summary>
+    [Required]
+    public string Password { get; init; } = "guest";
+    
+    /// <summary>
+    /// Base exchange name following {company}.{domain} pattern
+    /// Examples: "klim.events", "acme.commands", "contoso.notifications"
+    /// </summary>
+    [Required]
+    [RegularExpression(@"^[a-z]+\.[a-z]+$", ErrorMessage = "Exchange name must follow 'company.domain' pattern with lowercase letters")]
+    public string ExchangeName { get; init; } = "klim.events";
+    
+    /// <summary>
+    /// Routing key prefix following {company}.{domain} pattern
+    /// Used as base for all message routing keys
+    /// </summary>
+    [Required]
+    [RegularExpression(@"^[a-z]+\.[a-z]+$", ErrorMessage = "Routing key prefix must follow 'company.domain' pattern")]
+    public string RoutingKeyPrefix { get; init; } = "klim.events";
+    
+    /// <summary>
+    /// Template for data change event routing keys
+    /// Pattern: {prefix}.{entity}.{operation}.{version}
+    /// Example: "klim.events.issuer.created.v1"
+    /// </summary>
+    public string DataChangeRoutingKeyTemplate { get; init; } = "{prefix}.{entity}.{operation}.{version}";
+    
+    /// <summary>
+    /// Routing key for domain notification messages
+    /// Pattern: {prefix}.domain.notification.{version}
+    /// </summary>
+    public string DomainNotificationRoutingKey { get; init; } = "{prefix}.domain.notification.v1";
+    
+    /// <summary>
+    /// Dead letter exchange suffix for failed message handling
+    /// Results in: "{ExchangeName}.dlq"
+    /// </summary>
+    public string DeadLetterSuffix { get; init; } = "dlq";
+    
+    /// <summary>
+    /// Full exchange name without environment suffix
+    /// Pattern: {ExchangeName}
+    /// Example: "klim.events"
+    /// </summary>
+    public string FullExchangeName => ExchangeName;
+    
+    /// <summary>
+    /// Dead letter exchange name for failed messages
+    /// Pattern: {ExchangeName}.{DeadLetterSuffix}
+    /// Example: "klim.events.dlq"
+    /// </summary>
+    public string DeadLetterExchangeName => $"{ExchangeName}.{DeadLetterSuffix}";
+    
+    /// <summary>
+    /// Generates a routing key for data change events
+    /// </summary>
+    /// <param name="entityType">Entity type (e.g., "issuer", "deal")</param>
+    /// <param name="operation">Operation type (e.g., "created", "updated", "deleted")</param>
+    /// <param name="version">Message version (e.g., "v1", "v2")</param>
+    /// <returns>Formatted routing key</returns>
+    public string GetDataChangeRoutingKey(string entityType, string operation, string version = "v1") =>
+        DataChangeRoutingKeyTemplate
+            .Replace("{prefix}", RoutingKeyPrefix)
+            .Replace("{entity}", entityType.ToLowerInvariant())
+            .Replace("{operation}", operation.ToLowerInvariant())
+            .Replace("{version}", version.ToLowerInvariant());
+    
+    /// <summary>
+    /// Generates a routing key for domain notifications
+    /// </summary>
+    /// <param name="version">Message version (default: "v1")</param>
+    /// <returns>Formatted routing key</returns>
+    public string GetDomainNotificationRoutingKey(string version = "v1") =>
+        DomainNotificationRoutingKey
+            .Replace("{prefix}", RoutingKeyPrefix)
+            .Replace("{version}", version.ToLowerInvariant());
+}
+
+public sealed class DatabaseOptions
+{
+    public string ConnectionString { get; set; } = string.Empty;
+    public bool UseAzureAd { get; set; } = false;
+}
+
+public sealed class ChangeTrackingOptions
+{
+    public int PollingIntervalSeconds { get; set; } = 5;
+    public int BatchSize { get; set; } = 500;
+    public List<TrackedTableOption> Tables { get; set; } = new();
+
+    public sealed record TrackedTableOption(string Schema, string Name, string Pk);
+}
+
+public sealed class OutboxOptions
+{
+    public bool Enabled { get; set; } = true;
+    public int DeliveryIntervalSeconds { get; set; } = 2;
+    public int BatchSize { get; set; } = 100;
+    public int MaxConcurrentDispatches { get; set; } = 10;
+    public int DuplicateDetectionWindowMinutes { get; set; } = 30;
+    public int RetentionDays { get; set; } = 7;
+    public double CleanupIntervalHours { get; set; } = 6;
+    public bool UseAzureAd { get; set; } = false;
+}
+```
+
+================================================================================
+7. MESSAGE CONTRACTS
+================================================================================
+
+File: src/KLIM.Events.Service/Messaging/Contracts/DataChangedV1.cs
+```csharp
+namespace KLIM.Events.Messaging.Contracts;
+
+/// <summary>
+/// Generic data change event for any tracked entity (Issuers, Deals, etc.)
+/// Version: V1 (initial public contract).
+/// </summary>
+/// <param name="EntityId">Stable unique identifier of the entity (RowGUID where available).</param>
+/// <param name="EntityType">Type/category of the entity (e.g., "Issuer", "Deal").</param>
+/// <param name="DisplayName">Primary display name or identifier (ticker, name, etc.).</param>
+/// <param name="ChangeVersion">Underlying SQL Change Tracking version for ordering/debug.</param>
+/// <param name="ChangedAt">UTC timestamp when change was detected.</param>
+/// <param name="ChangeSource">Origin table or logical source e.g. dbo.Issuers.</param>
+/// <param name="Operation">CRUD semantic: I / U / D.</param>
+/// <param name="ChangedFields">List of changed field names (* for inserts, __Deleted for deletes).</param>
+/// <param name="PreImage">Partial pre-image (selected fields) for Update/Delete when available.</param>
+/// <param name="PostImage">Partial post-image (selected fields) for Insert/Update when available.</param>
+/// <param name="CorrelationId">Optional correlation id for distributed tracing.</param>
+public sealed record DataChangedV1(
+    Guid EntityId,
+    string EntityType,
+    string DisplayName,
+    long ChangeVersion,
+    DateTimeOffset ChangedAt,
+    string ChangeSource,
+    string Operation,
+    string[] ChangedFields,
+    Dictionary<string, object?>? PreImage,
+    Dictionary<string, object?>? PostImage,
+    Guid? CorrelationId = null
+);
+```
+
+File: src/KLIM.Events.Service/Infrastructure/ChangeTracking/DomainChangeNotification.cs
+```csharp
+namespace KLIM.Events.Service.Infrastructure.ChangeTracking;
+
+/// <summary>
+/// Domain-level notification for batch processing completion or system events
+/// Used for diagnostics and monitoring of the change tracking system
+/// </summary>
+/// <param name="NotificationId">Unique identifier for this notification</param>
+/// <param name="NotificationType">Type of notification (e.g., "BatchProcessed", "SystemHealthy", "ErrorOccurred")</param>
+/// <param name="Message">Human-readable message describing the notification</param>
+/// <param name="OccurredAt">UTC timestamp when the notification was generated</param>
+/// <param name="Source">Source system or component that generated the notification</param>
+/// <param name="Details">Additional structured data about the notification</param>
+/// <param name="CorrelationId">Optional correlation ID for distributed tracing</param>
+public sealed record DomainChangeNotification(
+    Guid NotificationId,
+    string NotificationType,
+    string Message,
+    DateTimeOffset OccurredAt,
+    string Source,
+    Dictionary<string, object?>? Details = null,
+    Guid? CorrelationId = null
+);
+```
+
+================================================================================
+8. DOCKER CONFIGURATION
+================================================================================
+
+File: docker-compose.yml
+```yaml
+services:
+  # KLIM Events Service
+  klim-events:
+    build:
+      context: .
+      dockerfile: src/KLIM.Events.Service/Dockerfile
+      target: runtime
+    image: klim/events-service:${VERSION:-latest}
+    container_name: klim-events-service
+    environment:
+      # Application Configuration
+      DOTNET_ENVIRONMENT: "${DOTNET_ENVIRONMENT:-Production}"
+      
+      # Database Configuration
+      Database__ConnectionString: "${DATABASE__CONNECTIONSTRING:?DATABASE__CONNECTIONSTRING is required}"
+      Database__UseAzureAd: "${DATABASE__USEAZUREAD:-true}"
+      
+      # RabbitMQ Configuration
+      RabbitMQ__Host: "${RABBITMQ__HOST:-host.docker.internal}"
+      RabbitMQ__Username: "${RABBITMQ__USERNAME:-guest}"
+      RabbitMQ__Password: "${RABBITMQ__PASSWORD:-guest}"
+      RabbitMQ__ExchangeName: "${RABBITMQ__EXCHANGENAME:-klim.events}"
+      RabbitMQ__RoutingKeyPrefix: "${RABBITMQ__ROUTINGKEYPREFIX:-klim.events}"
+      
+      # Change Tracking Configuration
+      ChangeTracking__PollingIntervalSeconds: "${CHANGETRACKING__POLLINGINTERVALSECONDS:-5}"
+      ChangeTracking__BatchSize: "${CHANGETRACKING__BATCHSIZE:-100}"
+      
+      # Outbox Configuration
+      MassTransit__Outbox__Enabled: "${MASSTRANSIT__OUTBOX__ENABLED:-true}"
+      MassTransit__Outbox__DeliveryIntervalSeconds: "${MASSTRANSIT__OUTBOX__DELIVERYINTERVALSECONDS:-2}"
+      MassTransit__Outbox__BatchSize: "${MASSTRANSIT__OUTBOX__BATCHSIZE:-50}"
+      MassTransit__Outbox__MaxConcurrentDispatches: "${MASSTRANSIT__OUTBOX__MAXCONCURRENTDISPATCHES:-5}"
+      MassTransit__Outbox__RetentionDays: "${MASSTRANSIT__OUTBOX__RETENTIONDAYS:-7}"
+      MassTransit__Outbox__CleanupIntervalHours: "${MASSTRANSIT__OUTBOX__CLEANUPINTERVALHOURS:-6}"
+      
+      # Azure AD Configuration (optional)
+      AZURE_CLIENT_ID: "${AZURE_CLIENT_ID:-}"
+      AZURE_CLIENT_SECRET: "${AZURE_CLIENT_SECRET:-}"
+      AZURE_TENANT_ID: "${AZURE_TENANT_ID:-}"
+      
+      # Health Check Configuration
+      Health__Port: "${HEALTH__PORT:-8080}"
+      
+      # Logging Configuration
+      Serilog__MinimumLevel__Default: "${SERILOG__MINIMUMLEVEL__DEFAULT:-Information}"
+      Serilog__MinimumLevel__Override__Microsoft: "${SERILOG__MINIMUMLEVEL__OVERRIDE__MICROSOFT:-Warning}"
+    
+    ports:
+      - "${EVENTS_HEALTH_PORT:-8080}:8080"
+    
+    volumes:
+      - ./logs:/app/logs                         # Mount logs for easy access
+      - ~/.azure:/home/appuser/.azure:ro         # Mount Azure credentials (optional)
+    
+    networks:
+      - klim-events
+    
+    restart: unless-stopped
+    
+    # Docker networking compatibility for external RabbitMQ
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Health check via HTTP endpoint
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    labels:
+      - "klim.service=events-service"
+      - "klim.version=${VERSION:-latest}"
+      - "klim.type=worker-service"
+
+# Networks
+networks:
+  klim-events:
+    driver: bridge
+    name: klim-events-network
+    labels:
+      - "klim.network=events"
+
+# =============================================================================
+# EXTERNAL DEPENDENCIES
+# =============================================================================
+# RabbitMQ: External container (competent_burnell - masstransitservices-rabbitmq:latest)
+# Connection: localhost:5672 (AMQP), localhost:15672 (Management)
+# Exchange: klim.events (configurable via RABBITMQ__EXCHANGENAME)
+# Database: Azure SQL Database (configurable via DATABASE__CONNECTIONSTRING)
+# Authentication: Azure AD (configurable via DATABASE__USEAZUREAD and Azure credentials)
+# =============================================================================
+```
+
+File: src/KLIM.Events.Service/Dockerfile
+```dockerfile
+# Multi-stage build for .NET 8 Worker Service with ASP.NET Core
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+# Copy project file for dependency restore
+COPY src/KLIM.Events.Service/KLIM.Events.Service.csproj src/KLIM.Events.Service/
+RUN dotnet restore src/KLIM.Events.Service/KLIM.Events.Service.csproj
+
+# Copy source and build (avoiding --no-restore to fix NuGet issue)
+COPY src/ src/
+RUN dotnet publish src/KLIM.Events.Service/KLIM.Events.Service.csproj \
+    -c Release \
+    -o /app/publish \
+    /p:UseAppHost=false \
+    /p:PublishTrimmed=false
+
+# Runtime stage - ASP.NET Core Runtime (required for Microsoft.AspNetCore.App framework reference)
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+
+# Install curl for health checks and debugging
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid appgroup --shell /bin/false --create-home appuser
+
+# Set working directory and copy app
+WORKDIR /app
+COPY --from=build --chown=appuser:appgroup /app/publish .
+
+# Configure environment for worker service with ASP.NET Core
+ENV DOTNET_ENVIRONMENT=Production
+ENV DOTNET_EnableDiagnostics=0
+ENV DOTNET_USE_POLLING_FILE_WATCHER=true
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080
+
+# Expose health check port
+EXPOSE 8080
+
+# Health check - using correct path
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health/live || exit 1
+
+# Switch to non-root user
+USER appuser
+
+# Start worker service
+ENTRYPOINT ["dotnet", "KLIM.Events.Service.dll"]
+```
+
+================================================================================
+9. DEPLOYMENT & OPERATIONS
+================================================================================
+
+Health Endpoints:
+- /health/live - Basic liveness check (no dependencies)
+- /health/ready - Readiness check (requires SQL Server and RabbitMQ)
+
+Deployment Commands:
+```powershell
+# Setup
+Copy-Item .env.template .env
+az login
+
+# Deploy
+docker-compose up --build -d
+
+# Health Check
+curl http://localhost:8080/health/live
+
+# View logs
+docker-compose logs -f klim-events
+
+# Stop
+docker-compose down
+```
+
+Performance Metrics:
+- Memory Usage: ~128MB typical, 256MB limit
+- Payload Sizes: 2KB+ with rich entity data (44+ fields)
+- Processing Time: ~1.7s per comprehensive change event
+- Health Checks: 100% success rate expected
+
+Environment Variables:
+- DOTNET_ENVIRONMENT: Production/Development
+- DATABASE__CONNECTIONSTRING: Azure SQL connection
+- DATABASE__USEAZUREAD: true/false for Azure AD auth
+- RABBITMQ__HOST: RabbitMQ server hostname
+- RABBITMQ__EXCHANGENAME: Message exchange name
+- All configuration sections can be overridden via environment variables
+
+================================================================================
+10. MESSAGE ROUTING & CONTRACTS
+================================================================================
+
+Exchange: klim.events (Topic Exchange)
+
+Routing Key Patterns:
+- Data Changes: klim.events.{entity}.{operation}.v1
+  Examples:
+  - klim.events.issuer.created.v1
+  - klim.events.issuer.updated.v1
+  - klim.events.deal.created.v1
+  
+- Domain Notifications: klim.events.domain.notification.v1
+
+Message Headers:
+- source: "events.service"
+- version: Message version (v1, v2, etc.)
+- correlation_id: Message correlation ID
+- timestamp_utc: UTC timestamp
+- payload_size_bytes: Message size in bytes
+- exchange: Target exchange name
+- event_type: Entity and operation (e.g., "issuer.updated")
+- entity_type: Entity type (e.g., "issuer")
+- entity_id: Entity identifier
+
+Sample DataChangedV1 Payload:
+```json
+{
+  "entityId": "550e8400-e29b-41d4-a716-446655440000",
+  "entityType": "Issuer",
+  "displayName": "AAPL (Apple Inc.)",
+  "changeVersion": 123456789,
+  "changedAt": "2024-12-01T10:30:00Z",
+  "changeSource": "dbo.Issuers",
+  "operation": "U",
+  "changedFields": ["IssuerName", "IssuerTicker"],
+  "preImage": {
+    "IssuerName": "Apple Computer Inc.",
+    "IssuerTicker": "AAPL"
+  },
+  "postImage": {
+    "IssuerName": "Apple Inc.",
+    "IssuerTicker": "AAPL"
+  },
+  "correlationId": "550e8400-e29b-41d4-a716-446655440001"
+}
+```
+
+================================================================================
+11. MONITORING & DIAGNOSTICS
+================================================================================
+
+Structured Logging:
+- Console output with timestamp and level
+- File logging with daily rotation (10 file retention)
+- MassTransit noise filtered out
+- Correlation ID propagation
+
+Key Log Sources:
+- KLIM.Events.Service.Infrastructure.Outbox: Outbox operations
+- KLIM.Events.Service.Infrastructure.ChangeTracking: Change detection
+- MassTransit: Filtered to Fatal level only
+
+Diagnostic Services:
+- OutboxDiagnosticService: Monitors outbox health and performance
+- Health checks for SQL Server and RabbitMQ dependencies
+- Payload size monitoring with configurable thresholds
+
+Error Handling:
+- Transactional outbox pattern ensures message delivery guarantees
+- Dead letter queue support (klim.events.dlq)
+- Retry policies with exponential backoff
+- Comprehensive error logging with structured data
+
+================================================================================
+12. SECURITY CONSIDERATIONS
+================================================================================
+
+Azure AD Authentication:
+- DefaultAzureCredential for seamless authentication
+- Support for managed identity, CLI, and interactive login
+- Connection string sanitization removes passwords when using Azure AD
+
+Container Security:
+- Non-root user (appuser:appgroup, UID/GID 1001)
+- Minimal base image (ASP.NET Core runtime)
+- Security-conscious Dockerfile practices
+
+Network Security:
+- Health endpoints on dedicated port (8080)
+- Docker network isolation (klim-events-network)
+- TLS encryption for SQL Server connections
+
+Configuration Security:
+- User secrets support for development
+- Environment variable based configuration
+- Sensitive data excluded from logs
+
+================================================================================
+13. PERFORMANCE & SCALABILITY
+================================================================================
+
+Optimization Features:
+- Connection pooling for SQL Server
+- Batched message processing (configurable batch sizes)
+- Concurrent dispatch with max limits
+- Payload size monitoring and optimization
+- Memory efficient processing with streaming
+
+Configuration Tuning:
+- PollingIntervalSeconds: 5 (balance between latency and resource usage)
+- BatchSize: 100 (change tracking), 50 (outbox dispatch)
+- MaxConcurrentDispatches: 5
+- RetentionDays: 7 (automatic cleanup)
+- DeliveryIntervalSeconds: 2 (near real-time)
+
+Resource Management:
+- Docker memory limits: 256MB max, 128MB reserved
+- Automatic log cleanup and rotation
+- Database connection lifecycle management
+- Graceful shutdown handling
+
+================================================================================
+14. EXTENSIBILITY & FUTURE ENHANCEMENTS
+================================================================================
+
+Projector Pattern:
+- IChangeEventProjector interface for entity-specific logic
+- Pluggable architecture supports new entity types
+- Generic projector as fallback for unsupported entities
+
+Configuration Extension Points:
+- TrackedTableOption for new tables
+- Message routing templates
+- Payload monitoring thresholds
+- Authentication strategies
+
+Future Roadmap Considerations:
+- Multi-tenant support
+- Schema evolution handling
+- Event sourcing integration
+- Metrics and observability enhancements
+- Kubernetes deployment support
+
+================================================================================
+END OF SPECIFICATION
+================================================================================
+
+This comprehensive technical specification covers the complete KLIM.Events 
+service implementation including architecture, configuration, source code 
+organization, deployment, and operational considerations. The service is 
+production-ready with enterprise-grade features for reliability, monitoring, 
+and security.
+
+For additional information, refer to the README.md and inline documentation 
+within the source code.

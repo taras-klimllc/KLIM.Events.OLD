@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using KLIM.Events.Service.Infrastructure.Outbox;
 using System.Text.Json;
 
 namespace KLIM.Events.Service.Infrastructure.ChangeTracking;
@@ -25,34 +26,31 @@ public sealed class GenericDomainChangeProjector : IChangeEventProjector
         {
             var detectedAt = DateTime.UtcNow;
             var dc = new DomainChangeNotification(
-                Table: $"{batch.Schema}.{batch.Table}",
-                EntityId: change.Id.ToString()!,
-                Operation: change.Operation,
-                ChangeVersion: change.Version,
-                DetectedAtUtc: detectedAt
+                NotificationId: Guid.NewGuid(),
+                NotificationType: "TableChange",
+                Message: $"Change detected in {batch.Schema}.{batch.Table}",
+                OccurredAt: DateTimeOffset.UtcNow,
+                Source: $"{batch.Schema}.{batch.Table}",
+                Details: new Dictionary<string, object?>
+                {
+                    ["Table"] = $"{batch.Schema}.{batch.Table}",
+                    ["EntityId"] = change.Id.ToString(),
+                    ["Operation"] = change.Operation,
+                    ["ChangeVersion"] = change.Version
+                }
             );
             var payload = JsonSerializer.Serialize(dc, _json);
-            var key = $"DomainChange|{dc.Table}|{dc.EntityId}|{dc.ChangeVersion}";
+            var key = $"DomainChange|{batch.Schema}.{batch.Table}|{change.Id}|{change.Version}";
             list.Add(new OutboxInsert(
                 Id: Guid.NewGuid(),
                 Type: EventType,
                 Payload: payload,
                 OccurredAt: detectedAt,
                 MessageKey: key,
-                SourceEntity: dc.Table,
-                SourceId: dc.EntityId,
-                ChangeVersion: dc.ChangeVersion));
+                SourceEntity: $"{batch.Schema}.{batch.Table}",
+                SourceId: change.Id.ToString()!,
+                ChangeVersion: change.Version));
         }
         return Task.FromResult<IEnumerable<OutboxInsert>>(list);
     }
 }
-
-/// <summary>
-/// Lightweight notification for changes in tables without specialized projectors
-/// </summary>
-public sealed record DomainChangeNotification(
-    string Table,
-    string EntityId,
-    string Operation,
-    long ChangeVersion,
-    DateTime DetectedAtUtc);

@@ -1,6 +1,18 @@
 using Microsoft.Data.SqlClient;
+using KLIM.Events.Service.Infrastructure.Outbox;
 
 namespace KLIM.Events.Service.Infrastructure.ChangeTracking;
+
+/// <summary>
+/// Interface for writing outbox messages to persistent storage
+/// </summary>
+public interface IOutboxWriter
+{
+    /// <summary>
+    /// Inserts multiple outbox messages within a transaction
+    /// </summary>
+    Task InsertManyAsync(SqlConnection conn, SqlTransaction tx, IReadOnlyCollection<OutboxInsert> inserts, CancellationToken ct);
+}
 
 public sealed class SqlOutboxWriter : IOutboxWriter
 {

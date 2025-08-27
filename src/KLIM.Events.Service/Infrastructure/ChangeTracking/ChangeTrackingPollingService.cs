@@ -2,6 +2,7 @@
 using Azure.Identity;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
+using KLIM.Events.Service.Infrastructure.Outbox;
 using System.Data;
 using System.Text.Json;
 

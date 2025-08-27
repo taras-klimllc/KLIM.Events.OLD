@@ -71,6 +71,10 @@ BEGIN CATCH
     THROW;
 END CATCH";
 
+    private const string SQL_INSERT_SINGLE = @"
+INSERT INTO dbo.OutboxMessages (Id, Type, Payload, Headers, OccurredAt, MessageKey, SourceEntity, SourceId, ChangeVersion)
+VALUES (@Id, @Type, @Payload, @Headers, @OccurredAt, @MessageKey, @SourceEntity, @SourceId, @ChangeVersion)";
+
     private readonly SqlAuthenticationService _authService;
     private readonly ILogger<OutboxRepository> _logger;
 
@@ -135,6 +139,27 @@ END CATCH";
         return await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task InsertManyAsync(string connectionString, bool useAzureAd, IEnumerable<OutboxInsert> inserts, CancellationToken cancellationToken)
+    {
+        await using var conn = await CreateConnectionAsync(connectionString, useAzureAd, cancellationToken);
+        await conn.OpenAsync(cancellationToken);
+
+        foreach (var insert in inserts)
+        {
+            await using var cmd = new SqlCommand(SQL_INSERT_SINGLE, conn) { CommandTimeout = DEFAULT_COMMAND_TIMEOUT };
+            cmd.Parameters.AddWithValue("@Id", insert.Id);
+            cmd.Parameters.AddWithValue("@Type", insert.Type);
+            cmd.Parameters.AddWithValue("@Payload", insert.Payload);
+            cmd.Parameters.AddWithValue("@Headers", (object?)insert.Headers ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@OccurredAt", insert.OccurredAt);
+            cmd.Parameters.AddWithValue("@MessageKey", (object?)insert.MessageKey ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@SourceEntity", (object?)insert.SourceEntity ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@SourceId", (object?)insert.SourceId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@ChangeVersion", (object?)insert.ChangeVersion ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
     private async Task<SqlConnection> CreateConnectionAsync(string connectionString, bool useAzureAd, CancellationToken cancellationToken)
     {
         var conn = new SqlConnection(connectionString);
@@ -168,4 +193,16 @@ public sealed record OutboxMessage(
     string? SourceId,
     long? ChangeVersion,
     string? MessageKey
+);
+
+public sealed record OutboxInsert(
+    Guid Id,
+    string Type,
+    string Payload,
+    DateTime OccurredAt,
+    string MessageKey,
+    string? SourceEntity,
+    string? SourceId,
+    long? ChangeVersion,
+    string? Headers = null
 );
